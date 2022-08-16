@@ -10,13 +10,15 @@ Server :: struct {
 	wait_group: Wait_Group;
 
 	should_quit: bool;
-	clients: [..] Client;
+	clients: Bucket_Array(Client, 64);
 }
 
 Client :: struct {
 	name: string;
 	socket: s32 = HANDLE_INVALID;
 	address: sockaddr_in;
+
+	next_request_index: int;
 
 	// Request data
 	request_pool: *Pool;
@@ -28,6 +30,7 @@ Client :: struct {
 
 Request :: struct {
 	pool: *Pool;
+	id: string;
 	header_data: string;
 	method: Http_Method;
 	url: string;
@@ -39,6 +42,29 @@ Request :: struct {
 
 	pending_body: String_Builder;
 }
+
+Hyperserve_Context :: struct {
+	server: Server;
+	client: *Client;
+	request: *Request;
+}
+
+#add_context hyperserve: Hyperserve_Context;
+
+push_client :: (client: *Client) #expand {
+    old_client     := context.hyperserve.client;
+    context.hyperserve.client  = client;
+
+    `defer context.hyperserve.client = old_client;
+}
+
+push_request :: (request: *Request) #expand {
+    old_request     := context.hyperserve.request;
+    context.hyperserve.request  = request;
+
+    `defer context.hyperserve.request = old_request;
+}
+
 
 Http_Method :: enum {
 	GET;
@@ -58,7 +84,7 @@ main :: () {
 		exit(1);
 	}
 
-	server: Server;
+	using context.hyperserve;
 
 	// @ToDo: IPv6
 	server.socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -144,6 +170,7 @@ deinit :: (using server: *Server) {
 }
 
 handle_event :: (handle: s32, is_eof: bool, server: *Server) {
+	assert(server == *context.hyperserve.server);
 	if handle == server.sigint_handle {
 		log("Caught SIGINT. Quitting for now…");
 		server.should_quit = true;
@@ -184,13 +211,14 @@ handle_event :: (handle: s32, is_eof: bool, server: *Server) {
 			return;
 		}
 
+		push_client(client);
 		handle_client_data(server, client, is_eof);
 	}
 }
 
 add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) -> success: bool {
 	// ToDo: Create an allocator for this client (and also use it for the name)
-	client: Client;
+	client := find_and_occupy_empty_slot(*server.clients);
 	client.name = to_string(client_addr);
 	client.socket = client_socket;
 	client.address = client_addr;
@@ -203,15 +231,17 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
 		remember_allocators(*client.header_end_offsets);
 	}
 
+
+	push_client(client);
+
 	log("Hello %!", client.name);
 	success := add_handles(*server.wait_group, client_socket);
 	if !success {
 		log_error("Couldn’t add socket of client %.", client.name);
-		deinit(*client);
+		deinit(client);
 		return false;
 	}
 
-	array_add(*server.clients, client);
 	return true;
 }
 
@@ -301,6 +331,11 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 	}
 }
 
+create_request_id :: (client: *Client) -> string {
+	defer client.next_request_index += 1;
+	return sprint("%_%", client.name, client.next_request_index);
+}
+
 parse_and_handle_request :: (server: *Server, client: *Client, header_data: string, pending_body: String_Builder, pool: *Pool) -> success: bool {
 	assert(client.header_end_offsets.count > 0);
 	if !header_data {
@@ -308,10 +343,12 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
 		return false;
 	}
 
-	request: Request;
+	request := New(Request);
+	request.id = create_request_id(client);
 	request.pool = pool;
 	request.header_data = header_data;
 	request.pending_body = pending_body;
+	push_request(request);
 
 	offset := client.header_end_offsets[0];
 	assert(offset <= request.header_data.count);
@@ -386,6 +423,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
 	}
 
 	// @ToDo: Handle request
+
 	remove_client(server, client);
 
 	return true;
@@ -468,3 +506,4 @@ System :: #import "System";
 #import "Hash_Table";
 #import "Pool";
 #import "String";
+#import "Bucket_Array";
