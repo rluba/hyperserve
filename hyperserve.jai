@@ -17,6 +17,37 @@ Client :: struct {
 	name: string;
 	socket: s32 = HANDLE_INVALID;
 	address: sockaddr_in;
+
+	// Request data
+	request_pool: *Pool;
+	pending_data: String_Builder;
+	header_end_offsets: [..] int;
+	was_cr: bool;
+	num_pending_newlines: int;
+}
+
+Request :: struct {
+	pool: *Pool;
+	header_data: string;
+	method: Http_Method;
+	url: string;
+
+	headers: Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
+	content_length: int;
+	content_type: string;
+	// @ToDo: More fields for commonly referenced headers
+
+	pending_body: String_Builder;
+}
+
+Http_Method :: enum {
+	GET;
+	POST;
+	PUT;
+	DELETE;
+	PATCH;
+	HEAD;
+	OPTIONS;
 }
 
 main :: () {
@@ -153,34 +184,25 @@ handle_event :: (handle: s32, is_eof: bool, server: *Server) {
 			return;
 		}
 
-		buffer: [1024] u8;
-		success, bytes_read := read_handle(handle, buffer);
-		if !success {
-			log_error("Could not read from client %. Closing connection…", client.name);
-			remove_client(server, client);
-			return;
-		}
-
-		if bytes_read {
-			read: string;
-			read.data = buffer.data;
-			read.count = bytes_read;
-			log("Client % said: %", client.name, read);
-		}
-
-		if is_eof {
-			log("Client % closed the connection.", client.name);
-			remove_client(server, client);
-		}
+		handle_client_data(server, client, is_eof);
 	}
 }
 
 add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) -> success: bool {
-	// ToDo: Allocator for this client (and also use it for the name)
+	// ToDo: Create an allocator for this client (and also use it for the name)
 	client: Client;
 	client.name = to_string(client_addr);
 	client.socket = client_socket;
 	client.address = client_addr;
+	client.request_pool = New(Pool);
+	set_allocators(client.request_pool);
+
+	{
+		push_allocator(pool_allocator_proc, client.request_pool);
+		remember_allocators(*client.pending_data);
+		remember_allocators(*client.header_end_offsets);
+	}
+
 	log("Hello %!", client.name);
 	success := add_handles(*server.wait_group, client_socket);
 	if !success {
@@ -208,6 +230,165 @@ remove_client :: (server: *Server, client: *Client) -> success: bool {
 deinit :: (client: *Client) {
 	free(client.name);
 	close_and_reset(*client.socket);
+	release(client.request_pool);
+	free(client.request_pool);
+}
+
+handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
+	should_remove := false;
+	{
+		push_allocator(pool_allocator_proc, client.request_pool);
+
+		buffer := ensure_contiguous_space_and_return_available_buffer(*client.pending_data, 128);
+		success, bytes_read := read_handle(client.socket, buffer);
+		if !success {
+			log_error("Could not read from client %. Closing connection…", client.name);
+			remove_client(server, client);
+			return;
+		}
+
+		if bytes_read {
+			new_data := to_string(buffer.data, bytes_read);
+			log("Client % said: %", client.name, new_data);
+
+			buffer_size := builder_string_length(*client.pending_data);
+			for i: 0..bytes_read-1 {
+				ch := buffer[i];
+				if ch == #char "\r" {
+					client.was_cr = true;
+				} else if ch == #char "\n" && client.was_cr {
+					client.was_cr = false;
+					client.num_pending_newlines += 1;
+					if client.num_pending_newlines == {
+						case 1;
+							end := buffer_size + i - 1;
+							assert(end >= 0);
+							array_add(*client.header_end_offsets, end);
+						case 2; 
+							log("Header complete!");
+
+							pending_body_data := to_string(buffer.data + i + 1, bytes_read - i - 1);
+							pending_body: String_Builder;
+							append(*pending_body, pending_body_data); // Has to happen before builder_to_string because that will deallocate the buffer that pending_body_data is referencing
+
+							advance_through_ensured_space(*client.pending_data, i);
+							header_data := builder_to_string(*client.pending_data);
+							success := parse_and_handle_request(server, client, header_data, pending_body, client.request_pool);
+							if !success {
+								should_remove = true;
+							}
+							break;
+					}
+				} else {
+					client.was_cr = false;
+					client.num_pending_newlines = 0;
+				}
+			}
+
+			advance_through_ensured_space(*client.pending_data, bytes_read);
+
+			// @ToDo: Check agains max header size we want to allow!
+		}
+	}
+
+	if is_eof {
+		log("Client % closed the connection.", client.name);
+		should_remove = true;
+	}
+	
+	if should_remove {
+		remove_client(server, client);
+	}
+}
+
+parse_and_handle_request :: (server: *Server, client: *Client, header_data: string, pending_body: String_Builder, pool: *Pool) -> success: bool {
+	assert(client.header_end_offsets.count > 0);
+	if !header_data {
+		log_error("Client %: Empty header.", client.name);
+		return false;
+	}
+
+	request: Request;
+	request.pool = pool;
+	request.header_data = header_data;
+	request.pending_body = pending_body;
+
+	offset := client.header_end_offsets[0];
+	assert(offset <= request.header_data.count);
+	request_line := to_string(request.header_data.data, offset);
+	offset += 2; // CRLF
+
+	// Parse request line
+	log("Request line: %", request_line);
+	found, method_string, remainder := split_from_left(request_line, #char " ");
+	if !found {
+		log_error("Bad request line: %", request_line);
+		return false;
+	}
+
+	if method_string == {
+		case "GET";     request.method = .GET;
+		case "POST";    request.method = .POST;
+		case "PUT";     request.method = .PUT;
+		case "DELETE";  request.method = .DELETE;
+		case "PATCH";   request.method = .PATCH;
+		case "HEAD";    request.method = .HEAD;
+		case "OPTIONS"; request.method = .OPTIONS;
+		case;
+			log_error("Unsupported request method: %", method_string);
+			return false;
+	}
+
+	http_version: string;
+	found, request.url, http_version = split_from_left(remainder, #char " ");
+	if http_version != "HTTP/1.1" {
+		log_error("Unsupported HTTP version: %", http_version);
+		return false;
+	}
+
+	if !request.url {
+		log_error("Bad request URL: %", request.url);
+		return false;
+	}
+
+	for i: 1..client.header_end_offsets.count-1 {
+		it := client.header_end_offsets[i];
+		assert(it > offset);
+		assert(it <= request.header_data.count);
+		header := to_string(request.header_data.data + offset, it - offset);
+		offset = it + 2; // CRLF
+
+		found, name, value := split_from_left(header, #char ":");
+		if !found {
+			log_error("Bad request header: %", header);
+			return false;
+		}
+
+		// Normalize
+		to_lower_in_place(name);
+		value = trim(value);
+
+		table_add(*request.headers, name, value);
+		log("Header %: %", name, value);
+		
+		if name == {
+			case "content-length";
+				result, success, remainder := to_integer(value);
+				if !success || remainder {
+					log_error("Invalid content length: %", value);
+					return false;
+				}
+				request.content_length = result;
+
+			case "content-type";
+				request.content_type = value;
+		}
+	}
+
+	// @ToDo: Handle request
+	remove_client(server, client);
+
+	return true;
 }
 
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
@@ -284,3 +465,6 @@ System :: #import "System";
 #scope_file
 
 #import "Command_Line";
+#import "Hash_Table";
+#import "Pool";
+#import "String";
