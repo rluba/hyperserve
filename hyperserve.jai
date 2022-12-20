@@ -512,23 +512,37 @@ handle_request :: (request: *Request) {
     }
 
     found, path, query := split_from_left(request.url, #char "?");
-    route: Route;
-    found, route = find_route(node, path);
-    if !found {
-        log_error("No route for % %", request.method, path);
-        return;
-    }
+    {
+        found, entry, parameters := find_route(node, path);
+        if !found {
+            log_error("No route for % %", request.method, path);
+            return;
+        }
 
-    // @ToDo: Parse arguments
-    route.handler(request, null);
+        log("Found route with parameters:");
+        assert(parameters.count == entry.parameters.count);
+        for parameters {
+            name := entry.parameters[it_index];
+            log("\t%: %", name, it);
+        }
+
+        path_info := cast(*Type_Info_Struct) entry.route.path_type;
+        log("Path info: %", <<path_info);
+        path_params := alloc(path_info.runtime_size);
+
+        // @ToDo: Parse arguments
+        entry.route.handler(request, null);
+    }
 }
 
-find_route :: (node: *Routing_Node, path: string) -> found: bool, route: Route {
+// @Cleanup, @Speed: The parameter handling and array stuff is very, very silly atm.
+find_route :: (node: *Routing_Node, path: string) -> found: bool, entry: Routing_Node.Entry, parameter_strings: [..] string {
     log("Trying to find route for \"%\" in %", path, <<node);
+    parameter_strings: [..] string;
 
     if !path {
         log_error("Not at an edge but there’s no more path left");
-        return false, .{};
+        return false, .{}, parameter_strings;
     }
 
 
@@ -536,7 +550,8 @@ find_route :: (node: *Routing_Node, path: string) -> found: bool, route: Route {
     fixed := table_find_pointer(*node.fixed, path);
     if fixed {
         log("Found a fixed handler!");
-        return true, fixed.route;
+        array_reserve(*parameter_strings, fixed.parameters.count);
+        return true, fixed, parameter_strings;
     }
 
     next_slash_index := find_index_from_left(path, #char "/", 1);
@@ -552,22 +567,32 @@ find_route :: (node: *Routing_Node, path: string) -> found: bool, route: Route {
     literal_node := table_find_pointer(*node.literal, segment);
     if literal_node {
         log("Found literal node for \"%\"", segment);
-        found, route := find_route(<<literal_node, remainder);
-        return found, route;
+        found, entry, params := find_route(<<literal_node, remainder);
+        return found, entry, params;
     }
 
-    if !remainder && node.edge.route.path return true, node.edge.route;
+
+    if !remainder && node.edge.route.path {
+        array_reserve(*parameter_strings, node.edge.parameters.count);
+        array_add(*parameter_strings, segment);
+        return true, node.edge, parameter_strings;
+    }
 
     if node.parameter {
         log("Found parameter node for \"%\"", segment);
-        found, route := find_route(node.parameter, remainder);
-        return found, route;
+        found, entry, params := find_route(node.parameter, remainder);
+        array_insert_at(*params, segment, 0);
+        return found, entry, params;
     }
 
-    if node.wildcard.route.path return true, node.wildcard.route;
+    if node.wildcard.route.path {
+        array_reserve(*parameter_strings, node.wildcard.parameters.count);
+        array_add(*parameter_strings, slice(path, 1, path.count - 1));
+        return true, node.wildcard, parameter_strings;
+    }
 
     log_error("Could not find a matching route for sub-path \"%\"", path);
-    return false, .{};
+    return false, .{}, parameter_strings;
 }
 
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
