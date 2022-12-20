@@ -29,7 +29,7 @@ Routing_Node :: struct {
     wildcard: Entry;
     edge: Entry;
     parameter: *Routing_Node;
-    parameter_index: int;
+    parameter_index: int; // @ToDo: can probably be removed, using it for debugging atm
 
     Entry :: struct {
         parameters: [] string;
@@ -74,6 +74,7 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
 }
 
 add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), parameters: [] string, segments: [] Route_Segment, parameter_index: int) -> bool {
+    // @ToDo: This is silly! Create this once and pass it through!
     entry: Routing_Node.Entry;
     entry.parameters = parameters;
     entry.segments = segments;
@@ -83,7 +84,7 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
     entry.route.payload_type = type_of(T.payload);
     entry.route.handler = xx handler;
 
-    if !parameters.count {
+    if parameters.count == parameter_index {
         // Fully literal
         
         length := 0;
@@ -195,6 +196,7 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
             }
 
             if parameter && parameter[parameter.count - 1] == #char "?" {
+                assert(false, "@Incomplete: The routing table doesn’t handle optional paths yet…");
                 segment.optional = true;
                 parameter.count -= 1;
             }

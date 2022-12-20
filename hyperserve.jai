@@ -100,8 +100,18 @@ main :: () {
             // @ToDo: reply
         });
         if !success exit(1);
+        success = add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
+            log("Got long path request!");
+            // @ToDo: reply
+        });
+        if !success exit(1);
+        success = add_route(*server, .GET, "/{prefix}/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;}, void, void)) {
+            log("Got long path request with prefix: %!", request.url);
+            // @ToDo: reply
+        });
+        if !success exit(1);
         success = add_route(*server, .GET, "/{path}", (request: *Request, parameters: *Request_Parameters(struct {path: string;}, void, void)) {
-            log("Got id request: %", request.url);
+            log("Got path request: %", request.url);
             // @ToDo: reply
         });
         if !success exit(1);
@@ -447,7 +457,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
         return false;
     }
 
-    if !request.url {
+    if !request.url || request.url[0] != #char "/" {
         log_error("Bad request URL: %", request.url);
         return false;
     }
@@ -487,10 +497,77 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
     }
 
     // @ToDo: Handle request
+    handle_request(request);
 
-    remove_client(server, client);
+    remove_client(server, client); // @Incomplete
 
     return true;
+}
+
+handle_request :: (request: *Request) {
+    node := table_find_pointer(*context.hyperserve.server.routes, request.method);
+    if !node {
+        log_error("No routes for method %", request.method);
+        return;
+    }
+
+    found, path, query := split_from_left(request.url, #char "?");
+    route: Route;
+    found, route = find_route(node, path);
+    if !found {
+        log_error("No route for % %", request.method, path);
+        return;
+    }
+
+    // @ToDo: Parse arguments
+    route.handler(request, null);
+}
+
+find_route :: (node: *Routing_Node, path: string) -> found: bool, route: Route {
+    log("Trying to find route for \"%\" in %", path, <<node);
+
+    if !path {
+        log_error("Not at an edge but there’s no more path left");
+        return false, .{};
+    }
+
+
+    assert(path != "");
+    fixed := table_find_pointer(*node.fixed, path);
+    if fixed {
+        log("Found a fixed handler!");
+        return true, fixed.route;
+    }
+
+    next_slash_index := find_index_from_left(path, #char "/", 1);
+    segment: string;
+    remainder: string;
+    if next_slash_index == -1 {
+        segment = slice(path, 1, path.count - 1);
+        remainder = "";
+    } else {
+        segment = slice(path, 1, next_slash_index - 1);
+        remainder = slice(path, next_slash_index, path.count - next_slash_index);
+    }
+    literal_node := table_find_pointer(*node.literal, segment);
+    if literal_node {
+        log("Found literal node for \"%\"", segment);
+        found, route := find_route(<<literal_node, remainder);
+        return found, route;
+    }
+
+    if !remainder && node.edge.route.path return true, node.edge.route;
+
+    if node.parameter {
+        log("Found parameter node for \"%\"", segment);
+        found, route := find_route(node.parameter, remainder);
+        return found, route;
+    }
+
+    if node.wildcard.route.path return true, node.wildcard.route;
+
+    log_error("Could not find a matching route for sub-path \"%\"", path);
+    return false, .{};
 }
 
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
