@@ -237,7 +237,7 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
 	log("Hello %!", client.name);
 	success := add_handles(*server.wait_group, client_socket);
 	if !success {
-		log_error("Couldn’t add socket of client %.", client.name);
+		log_error("Couldn’t add socket of client % to the server wait group.", client.name);
 		deinit(client);
 		return false;
 	}

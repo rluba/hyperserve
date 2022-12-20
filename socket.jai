@@ -4,13 +4,13 @@ HANDLE_INVALID :: -1;
 
 INADDR_ANY: u32 : 0x00000000;
 
-to_string :: (addr: sockaddr_in, allocator := context.allocator) -> string {
+to_string :: (addr: sockaddr_in) -> string {
     // TODO: This is hacky ass shit.
     a := cast(u8) (addr.sin_addr.s_addr >> 0) & 0xff;
     b := cast(u8) (addr.sin_addr.s_addr >> 8) & 0xff;
     c := cast(u8) (addr.sin_addr.s_addr >> 16) & 0xff;
     d := cast(u8) (addr.sin_addr.s_addr >> 24) & 0xff;
-    return sprint("%.%.%.%:%", a, b, c, d, addr.sin_port, allocator = allocator);
+    return sprint("%.%.%.%:%", a, b, c, d, addr.sin_port);
 }
 
 write :: inline (fd: s32, msg: string) -> s64 {
@@ -58,4 +58,4 @@ bind :: (socket: s32, address: u32, port: u16, family: type_of(sockaddr_in.sin_f
 #import "Basic";
 #import "POSIX";
 
-libc :: #foreign_system_library "libc";
+libc :: #system_library "libc";
