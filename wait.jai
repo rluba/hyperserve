@@ -85,7 +85,7 @@ deinit :: (group: *Wait_Group) {
 		group.poll_fds = null;
 	} else {
 		#assert(OS == .MACOS);
-        close_and_reset(*group.kevent_queue);
+        close_and_reset_fd(*group.kevent_queue);
 	}
 }
 
@@ -156,7 +156,7 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (handle: s32, 
     return success;
 }
 
-close_and_reset :: (fd: *s32, loc := #caller_location) {
+close_and_reset_fd :: (fd: *s32, loc := #caller_location) {
     if <<fd != -1 {
         result := close(<<fd);
         if result == -1 {

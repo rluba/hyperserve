@@ -2,6 +2,8 @@ Args :: struct {
 	port: u16 = 80;
 }
 
+HANDLE_INVALID :: -1;
+
 Server :: struct {
 	socket: s32 = HANDLE_INVALID;
 	sigint_handle: s32 = HANDLE_INVALID;
@@ -87,7 +89,7 @@ main :: () {
 	using context.hyperserve;
 
 	// @ToDo: IPv6
-	server.socket = socket(AF_INET, SOCK_STREAM, 0);
+	server.socket = socket(AF_INET, .STREAM, 0);
 	if server.socket == HANDLE_INVALID {
 		error_code, error_string := System.get_error_value_and_string();
 		log_error("Couldn’t create socket: % %", error_code, error_string);
@@ -269,7 +271,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 	{
 		push_allocator(pool_allocator_proc, client.request_pool);
 
-		buffer := ensure_contiguous_space_and_return_available_buffer(*client.pending_data, 128);
+		buffer := ensure_contiguous_space_and_return_available_range(*client.pending_data, 128);
 		success, bytes_read := read_handle(client.socket, buffer);
 		if !success {
 			log_error("Could not read from client %. Closing connection…", client.name);
@@ -498,12 +500,12 @@ System :: #import "System";
 
 
 #load "wait.jai";
-#load "socket.jai";
 
 #scope_file
 
 #import "Command_Line";
 #import "Hash_Table";
 #import "Pool";
+#import "Socket";
 #import "String";
 #import "Bucket_Array";
