@@ -89,7 +89,7 @@ deinit :: (using server: *Server) {
     close_and_reset(*sigterm_handle);
 }
 
-        // Print route tree for debugging
+// Print route tree for debugging
 debug_print_routes :: (server: *Server) {
     for node, method: server.routes {
         print("%:\n", method);
@@ -181,21 +181,13 @@ listen :: (server: *Server, port: u16) -> bool {
         return false;
     }
 
-    #if OS == .LINUX {
-        server.sigint_handle = create_signal_handle(SIGINT);
-        server.sigquit_handle = create_signal_handle(SIGQUIT);
-        server.sigterm_handle = create_signal_handle(SIGTERM);
-
-        success = add_handles(*server.wait_group, server.sigint_handle, server.sigquit_handle, server.sigterm_handle);
-        if !success {
-            deinit(server);
-            return false;
-        }
-    } else {
-        #assert(OS == .MACOS); // @Incomplete
-        // @Incomplete: Use kevent for SIGNAL on macoOS
+    // @ToDo: Strangely, our signal handlers are not called for SIGQUIT or SIGTERM on macOS.
+    // Needs investigation…
+    success = add_signals(*server.wait_group, SIGINT, SIGQUIT, SIGTERM); 
+    if !success {
+        deinit(server);
+        return false;
     }
-
 
     return true;
 }
@@ -217,17 +209,23 @@ update :: (server: *Server) -> bool{
 #scope_file
 
 
-handle_event :: (handle: s32, is_eof: bool, server: *Server) {
+handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
     assert(server == *context.hyperserve.server);
-    if handle == server.sigint_handle {
-        log("Caught SIGINT. Quitting for now…");
-        server.should_quit = true;
-    } else if handle == server.sigquit_handle {
-        log("Caught SIGQUIT. Quitting…");
-        server.should_quit = true;
-    } else if handle == server.sigterm_handle {
-        log("Caught SIGTERM. Quitting…");
-        server.should_quit = true;
+    if is_signal {
+        if handle == {
+            case SIGINT; 
+                log("Caught SIGINT. Quitting for now…");
+                server.should_quit = true;
+            case SIGQUIT; 
+                log("Caught SIGQUIT. Quitting…");
+                server.should_quit = true;
+            case SIGTERM; 
+                log("Caught SIGTERM. Quitting…");
+                server.should_quit = true;
+            case;
+                log("Caught unexpected signal: %", handle);
+                assert(false);
+        }
     } else if handle == server.socket {
         log("Receiving new connection");
         if is_eof {

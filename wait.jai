@@ -3,13 +3,13 @@ Wait_Group :: struct {
         kevent_queue: s32 = -1;
     } else #if OS == .LINUX {
         poll_fds: [..] pollfd;
+        signals_by_handle: Table(s32, s32); // Map from handle to signal
     } else {
         #assert(false);
     }
 }
 
-// @ToDo: Wait for write?
-init :: (group: *Wait_Group, handles: .. s32) -> success: bool {
+init :: (group: *Wait_Group) -> success: bool {
     #if OS == .MACOS {
         group.kevent_queue = kqueue();
         if group.kevent_queue == -1 {
@@ -26,12 +26,15 @@ deinit :: (group: *Wait_Group) {
     #if OS == .LINUX {
         free(group.poll_fds);
         group.poll_fds = null;
+        for signal, handle: signals_by_handle {
+            close_and_reset_fd(handle);
+        }
+        uninit(*signals_by_handle);
     } else {
         #assert(OS == .MACOS);
         close_and_reset_fd(*group.kevent_queue);
     }
 }
-
 
 add_handles :: (group: *Wait_Group, handles: .. s32) -> success: bool {
     #if OS == .LINUX {
@@ -54,7 +57,35 @@ add_handles :: (group: *Wait_Group, handles: .. s32) -> success: bool {
         if result == -1 {
             error_code, error_string := System.get_error_value_and_string();
             log_error("Could not register events with the event queue: % %", error_code, error_string);
-            deinit(group);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+add_signals :: (group: *Wait_Group, signals: ..s32) -> success: bool {
+    #if OS == .LINUX {
+        handles := NewArray(signals.count, s32, allocator = temp);
+        for signals {
+            handle := create_signal_handle(it);
+            handles[it_index] = handle;
+            table_add(*group.signals_by_handle, handle, it);
+        }
+        success := add_handles(group, .. handles);
+        if !success return false;
+    } else {
+        #assert(OS == .MACOS); // @Incomplete
+        events := NewArray(signals.count, Kevent64, allocator = temp);
+        for signals {
+            events[it_index].ident = cast(u64) it;
+            events[it_index].filter = .SIGNAL;
+            events[it_index].flags = .ADD;
+        }
+        result := kevent64(group.kevent_queue, events.data, cast (s32) events.count, null, 0, 0, null);
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not register signal events with the event queue: % %", error_code, error_string);
             return false;
         }
     }
@@ -90,7 +121,10 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
     return true;
 }
 
-wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (handle: s32, is_eof: bool, data: T), timeout_ms := -1) -> success: bool {
+// @ToDo: remove_signal
+
+// @Hack: replace is_signal with a separate" on_signal event handler?
+wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bool, handle: s32, is_eof: bool, data: T), timeout_ms := -1) -> success: bool {
     success := true;
 
     #if OS == .LINUX {
@@ -102,27 +136,22 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (handle: s32, 
             return false, 0, 0;
         }
 
-        // log("% poll events for %: %", num_events, <<process, poll_fds);
-
         for i: 0..group.poll_fds.count-1 {
             it := group.poll_fds[i];
             handle := it.fd; 
-            pipe: *Process.Pipe;
-            if handle == process.output.handle {
-                pipe = *process.output;
-            } else {
-                assert(handle == process.error.handle);
-                pipe = *process.error;
-            }
 
             if it.revents & POLLNVAL {
-                log_error("Pipe % of % reported invalid value: %", <<pipe, <<process, it);
+                log_error("Handle % reported invalid value: %", handle, it);
                 success = false;
             }
 
-            read_success: bool;
-            is_eof := (it.revents & POLLHUP) != 0;
-            on_event(handle, is_eof, data);
+            signal := table_find_pointer(group.signals_by_handle, handle);
+            if signal {
+                on_event(true, <<signal, false, data);
+            } else {
+                is_eof := (it.revents & POLLHUP) != 0;
+                on_event(false, handle, is_eof, data);
+            }
         }
     } else {
         #assert(OS == .MACOS);
@@ -149,7 +178,10 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (handle: s32, 
             if event.filter == .READ {
                 handle := cast(s32) event.ident;
                 is_eof := (event.flags & .EOF) != 0;
-                on_event(handle, is_eof, data);
+                on_event(false, handle, is_eof, data);
+            } else if event.filter == .SIGNAL {
+                signal := cast(s32) event.ident;
+                on_event(true, signal, false, data);
             }
         }
     }
