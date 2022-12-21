@@ -16,21 +16,22 @@ main :: () {
     }
 
     using context.hyperserve;
+    server.verbose = args.verbose;
 
     {
         success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
             log("Got root request!");
-            // @ToDo: reply
+            respond("pretend this is index.html", content_type = "text/html");
         });
         success &= add_route(*server, .POST, "/", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
             log("Got root POST!");
-            // @ToDo: reply
+            respond("Something was wrong with your post", 422);
         });
         success &= add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
             log("Got long path request!");
             // @ToDo: reply
         });
-        success &= add_route(*server, .GET, "/{prefix}/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;}, void, void)) {
+        success &= add_route(*server, .GET, "/{prefix}/long/path/but/no/more/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;}, void, void)) {
             log("Got long path request with prefix: %!", request.url);
             // @ToDo: reply
         });

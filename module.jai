@@ -1,16 +1,17 @@
 HANDLE_INVALID :: -1;
 
 Server :: struct {
+    verbose         := false;
     socket:         s32 = HANDLE_INVALID;
     sigint_handle:  s32 = HANDLE_INVALID;
     sigquit_handle: s32 = HANDLE_INVALID;
     sigterm_handle: s32 = HANDLE_INVALID;
-    wait_group: Wait_Group;
+    wait_group:     Wait_Group;
 
-    should_quit: bool;
-    clients: Bucket_Array(Client, 64);
+    should_quit:    bool;
+    clients:        Bucket_Array(Client, 64);
 
-    routes: Table(Http_Method, Routing_Node);
+    routes:         Table(Http_Method, Routing_Node);
 }
 
 Client :: struct {
@@ -192,6 +193,38 @@ listen :: (server: *Server, port: u16) -> bool {
     return true;
 }
 
+Status_Code :: enum {
+    // @Incomplete
+    OK                              :: 200;
+    CREATED                         :: 201;
+    ACCEPTED                        :: 202;
+    NO_CONTENT                      :: 204;
+    MOVED_PERMANENTLY               :: 301;
+    FOUND                           :: 302;
+    NOT_MODIFIED                    :: 304;
+    TEMPORARY_REDIRECT              :: 307;
+    PERMANENT_REDIRECT              :: 308;
+
+    BAD_REQUEST                     :: 400;
+    UNAUTHORIZED                    :: 401;
+    FORBIDDEN                       :: 403;
+    NOT_FOUND                       :: 404;
+    CONFLICT                        :: 409;
+    PAYLOAD_TOO_LARGE               :: 413;
+    UNSUPPORTED_MEDIA_TYPE          :: 415;
+    UNPROCESSABLE_ENTITY            :: 422;
+    BAD_DATA                        :: UNPROCESSABLE_ENTITY;
+    REQUEST_HEADER_FIELDS_TOO_LARGE :: 431;
+
+    INTERNAL_SERVER_ERROR           :: 500;
+    NOT_IMPLEMENTED                 :: 501;
+    HTTP_VERSION_NOT_SUPPORTED      :: 505;
+}
+
+code :: (status_code: int) -> Status_Code {
+    return xx status_code;
+}
+
 update :: (server: *Server) -> bool{
     success := wait_for_events(*server.wait_group, server, handle_event);
     if !success {
@@ -203,10 +236,76 @@ update :: (server: *Server) -> bool{
     return server.should_quit;
 }
 
+respond :: (response: string, status_code := Status_Code.OK, content_type := "text/plain") {
+    using context.hyperserve;
+
+    builder: String_Builder;
+    defer free_buffers(*builder);
+    print_to_builder(*builder, "HTTP/1.1 % %\r\n", cast(int) status_code, get_reason_string(status_code));
+    print_to_builder(*builder, "content-length: %\r\n", response.count);
+    print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
+    // @Incomplete: custom headers
+    append(*builder, "\r\n");
+    append(*builder, response);
+
+    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false)); 
+
+    // Actually send the response
+    buffer := get_base_buffer(*builder);
+    while buffer {
+        data := get_buffer_data(buffer);
+        remaining := buffer.count;
+        while remaining {
+            result := send(client.socket, data, cast(u64) remaining, 0);
+            if result == -1 {
+                error_code := get_last_socket_error();
+                error_string := System.get_error_string(error_code);
+                log_error("Could not send response: % %", error_code, error_string);
+                return;
+            }
+            assert(result <= remaining);
+            data += result;
+            remaining -= result;
+        }
+
+        buffer = buffer.next;
+    }
+}
+
 #load "wait.jai";
 #load "routes.jai";
 
 #scope_file
+
+get_reason_string :: (code: Status_Code) -> string {
+    if #complete code == {
+        case .OK;                              return "OK";
+        case .CREATED;                         return "Created";
+        case .ACCEPTED;                        return "Accepted";
+        case .NO_CONTENT;                      return "No Content";
+        case .MOVED_PERMANENTLY;               return "Moved Permanently";
+        case .FOUND;                           return "Found";
+        case .NOT_MODIFIED;                    return "Not Modified";
+        case .TEMPORARY_REDIRECT;              return "Temporary Redirect";
+        case .PERMANENT_REDIRECT;              return "Permanent Redirect";
+
+        case .BAD_REQUEST;                     return "Bad Request";
+        case .UNAUTHORIZED;                    return "Unauthorized";
+        case .FORBIDDEN;                       return "Forbidden";
+        case .NOT_FOUND;                       return "Not Found";
+        case .CONFLICT;                        return "Conflict";
+        case .PAYLOAD_TOO_LARGE;               return "Payload Too Large";
+        case .UNSUPPORTED_MEDIA_TYPE;          return "Unsupported Media Type";
+        case .UNPROCESSABLE_ENTITY;            return "Unprocessable Entity";
+        case .REQUEST_HEADER_FIELDS_TOO_LARGE; return "Request Header Fields Too Large";
+    
+        case .INTERNAL_SERVER_ERROR;           return "Internal Server Error";
+        case .NOT_IMPLEMENTED;                 return "Not Implemented";
+        case .HTTP_VERSION_NOT_SUPPORTED;      return "Http Version Not Supported";
+    }
+
+    return "Unknown Status Code";
+}
 
 
 handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
