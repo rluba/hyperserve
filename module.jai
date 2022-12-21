@@ -1,7 +1,3 @@
-Args :: struct {
-    port: u16 = 80;
-}
-
 HANDLE_INVALID :: -1;
 
 Server :: struct {
@@ -79,169 +75,147 @@ Http_Method :: enum {
     OPTIONS;
 }
 
-main :: () {
-    success, args := parse_arguments(Args);
-    if !success {
-        // @ToDo!
-        log("Invalid arguments");
-        exit(1);
-    }
-
-    using context.hyperserve;
-
-    {
-        success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
-            log("Got root request!");
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .POST, "/", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
-            log("Got root POST!");
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
-            log("Got long path request!");
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .GET, "/{prefix}/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;}, void, void)) {
-            log("Got long path request with prefix: %!", request.url);
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .GET, "/{path}", (request: *Request, parameters: *Request_Parameters(struct {path: string;}, void, void)) {
-            log("Got path request: %", request.url);
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters(void, void, void)) {
-            log("Got ping request!");
-            // @ToDo: reply
-        });
-        if !success exit(1);
-        success = add_route(*server, .GET, "/ping/{path*}", (request: *Request, parameters: *Request_Parameters(struct {path: string;}, void, void)) {
-            log("Got ping request with path: %", request.url);
-            // @ToDo: reply
-        });
-        success = add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(struct {id: int; upload_id: int; path: string;}, void, void)) {
-            log("Got members request with path: %", request.url);
-            // @ToDo: reply
-        });
-        if !success exit(1);
-
-        for node, method: server.routes {
-            print("%:\n", method);
-            print_node(*node, 1);
-            print_node :: (node: *Routing_Node, depth: int) {
-                for node.fixed {
-                    for 0..depth - 1 print("    ");
-                    print("%\n", it_index);
-                }
-                for node.literal {
-                    for 0..depth - 1 print("    ");
-                    print("/%:\n", it_index);
-                    print_node(it, depth + 1);
-                }
-                if node.wildcard.route.path {
-                    for 0..depth - 1 print("    ");
-                    print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
-                }
-                if node.edge.route.path {
-                    for 0..depth - 1 print("    ");
-                    print("/{%}\n", node.edge.parameters[node.edge.parameters.count - 1]);
-                }
-                if node.parameter {
-                    for 0..depth - 1 print("    ");
-                    print("/{param_%}:\n", node.parameter_index);
-                    print_node(node.parameter, depth + 1);
-                }
-            }
-        }
-    }
-
-    // @ToDo: IPv6
-    server.socket = socket(AF_INET, .STREAM, 0);
-    if server.socket == HANDLE_INVALID {
-        error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t create socket: % %", error_code, error_string);
-        exit(1);
-    }
-
-    result := fcntl(server.socket, F_SETFL, fcntl(server.socket, F_GETFL) | O_NONBLOCK);
-    if result == -1 {
-        error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t set socket to non-blocking: % %", error_code, error_string);
-        exit(1);
-    }
-
-    reuse_addr: s32 = 1;
-    result = setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
-    if result == -1 {
-        error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t set socket options: % %", error_code, error_string);
-        exit(1);
-    }
-
-    result = bind(server.socket, INADDR_ANY, args.port);
-    if result == -1 {
-        error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t bind socket: % %", error_code, error_string);
-        exit(1);
-    }
-
-    result = listen(server.socket, SOMAXCONN);
-    if result == -1 {
-        error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t listen on socket: % %", error_code, error_string);
-        exit(1);
-    }
-    log("listening on socket %\n", server.socket);
-
-    // @ToDo: Use kevent for SIGNAL on macoOS
-    // server.sigint_handle = create_signal_handler(SIGINT);
-    // server.sigquit_handle = create_signal_handler(SIGQUIT);
-    // server.sigterm_handle = create_signal_handler(SIGTERM);
-
-    success = init(*server.wait_group);
-    if !success {
-        deinit(*server);
-        exit(1);
-    }
-
-    success = add_handles(*server.wait_group, server.socket);
-    if !success {
-        deinit(*server);
-        exit(1);
-    }
-
-    if success {
-        // @ToDo
-        // , server.sigint_handle, server.sigquit_handle, server.sigterm_handle);
-        while !server.should_quit {
-            success := wait_for_events(*server.wait_group, *server, handle_event);
-            if !success {
-                error_code, error_string := System.get_error_value_and_string();
-                log_error("Couldn’t wait for events. Exiting…");
-                server.should_quit = true;
-            }
-        }
-    }
-    deinit(*server);
-
-}
-
 deinit :: (using server: *Server) {
     // @ToDo: Give clients a chance to finish
     for * clients {
         remove_client(server, it);
     }
 
+    deinit(*wait_group);
+
     close_and_reset(*socket);
     close_and_reset(*sigint_handle);
     close_and_reset(*sigquit_handle);
     close_and_reset(*sigterm_handle);
 }
+
+        // Print route tree for debugging
+debug_print_routes :: (server: *Server) {
+    for node, method: server.routes {
+        print("%:\n", method);
+        print_node(*node, 1);
+        print_node :: (node: *Routing_Node, depth: int) {
+            for node.fixed {
+                for 0..depth - 1 print("    ");
+                print("%\n", it_index);
+            }
+            for node.literal {
+                for 0..depth - 1 print("    ");
+                print("/%:\n", it_index);
+                print_node(it, depth + 1);
+            }
+            if node.wildcard.route.path {
+                for 0..depth - 1 print("    ");
+                print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
+            }
+            if node.edge.route.path {
+                for 0..depth - 1 print("    ");
+                print("/{%}\n", node.edge.parameters[node.edge.parameters.count - 1]);
+            }
+            if node.parameter {
+                for 0..depth - 1 print("    ");
+                print("/{param_%}:\n", node.parameter_index);
+                print_node(node.parameter, depth + 1);
+            }
+        }
+    }
+}
+
+listen :: (server: *Server, port: u16) -> bool {
+    // @ToDo: IPv6
+    // @ToDo: optionally restrict interface
+    server.socket = socket(AF_INET, .STREAM, 0);
+    if server.socket == HANDLE_INVALID {
+        error_code := get_last_socket_error();
+        error_string := System.get_error_string(error_code);
+        log_error("Couldn’t create socket: % %", error_code, error_string);
+        return false;
+    }
+
+    success := set_blocking(server.socket, false);
+    if !success {
+        error_code := get_last_socket_error();
+        error_string := System.get_error_string(error_code);
+        log_error("Couldn’t set socket to non-blocking: % %", error_code, error_string);
+        deinit(server);
+        return false;
+    }
+
+    reuse_addr: s32 = 1;
+    result := setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
+    if result == -1 {
+        error_code := get_last_socket_error();
+        error_string := System.get_error_string(error_code);
+        log_error("Couldn’t set socket options: % %", error_code, error_string);
+        deinit(server);
+        return false;
+    }
+
+    result = bind(server.socket, INADDR_ANY, port);
+    if result == -1 {
+        error_code := get_last_socket_error();
+        error_string := System.get_error_string(error_code);
+        log_error("Couldn’t bind socket: % %", error_code, error_string);
+        deinit(server);
+        return false;
+    }
+
+    result = listen(server.socket, SOMAXCONN);
+    if result == -1 {
+        error_code := get_last_socket_error();
+        error_string := System.get_error_string(error_code);
+        log_error("Couldn’t listen on socket: % %", error_code, error_string);
+        deinit(server);
+        return false;
+    }
+
+    success = init(*server.wait_group);
+    if !success {
+        deinit(server);
+        return false;
+    }
+
+    success = add_handles(*server.wait_group, server.socket);
+    if !success {
+        deinit(server);
+        return false;
+    }
+
+    #if OS == .LINUX {
+        server.sigint_handle = create_signal_handle(SIGINT);
+        server.sigquit_handle = create_signal_handle(SIGQUIT);
+        server.sigterm_handle = create_signal_handle(SIGTERM);
+
+        success = add_handles(*server.wait_group, server.sigint_handle, server.sigquit_handle, server.sigterm_handle);
+        if !success {
+            deinit(server);
+            return false;
+        }
+    } else {
+        #assert(OS == .MACOS); // @Incomplete
+        // @Incomplete: Use kevent for SIGNAL on macoOS
+    }
+
+
+    return true;
+}
+
+update :: (server: *Server) -> bool{
+    success := wait_for_events(*server.wait_group, server, handle_event);
+    if !success {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Couldn’t wait for events. Exiting…");
+        server.should_quit = true;
+    }
+
+    return server.should_quit;
+}
+
+#load "wait.jai";
+#load "routes.jai";
+
+#scope_file
+
 
 handle_event :: (handle: s32, is_eof: bool, server: *Server) {
     assert(server == *context.hyperserve.server);
@@ -304,7 +278,6 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
         remember_allocators(*client.pending_data);
         remember_allocators(*client.header_end_offsets);
     }
-
 
     push_client(client);
 
@@ -657,20 +630,17 @@ read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
 //     }
 // }
 
+#scope_module
+
 #import "Basic";
-#import "POSIX";
-#import "Thread";
-System :: #import "System";
-
-
-#load "wait.jai";
-#load "routes.jai";
-
-#scope_file
-
-#import "Command_Line";
+#import "Bucket_Array";
 #import "Hash_Table";
 #import "Pool";
+#import "Thread";
 #import "Socket";
 #import "String";
-#import "Bucket_Array";
+System :: #import "System";
+
+#if OS != .WINDOWS {
+    #import "POSIX";
+}

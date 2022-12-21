@@ -16,3 +16,4 @@
 .DS_Store
 *.dSYM
 hyperserve
+examples/example

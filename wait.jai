@@ -22,6 +22,17 @@ init :: (group: *Wait_Group, handles: .. s32) -> success: bool {
     return true;
 }
 
+deinit :: (group: *Wait_Group) {
+    #if OS == .LINUX {
+        free(group.poll_fds);
+        group.poll_fds = null;
+    } else {
+        #assert(OS == .MACOS);
+        close_and_reset_fd(*group.kevent_queue);
+    }
+}
+
+
 add_handles :: (group: *Wait_Group, handles: .. s32) -> success: bool {
     #if OS == .LINUX {
         array_reserve(*group.poll_fds, *group.poll_fds.count + handles.count);
@@ -77,16 +88,6 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
     }
 
     return true;
-}
-
-deinit :: (group: *Wait_Group) {
-    #if OS == .LINUX {
-        free(group.poll_fds);
-        group.poll_fds = null;
-    } else {
-        #assert(OS == .MACOS);
-        close_and_reset_fd(*group.kevent_queue);
-    }
 }
 
 wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (handle: s32, is_eof: bool, data: T), timeout_ms := -1) -> success: bool {
@@ -170,7 +171,7 @@ close_and_reset_fd :: (fd: *s32, loc := #caller_location) {
 #scope_file
 
 #if OS == .LINUX {
-    create_signal_handler :: (signal: s32) -> handle: s32, success: bool {
+    create_signal_handle :: (signal: s32) -> handle: s32, success: bool {
         sig_mask: sigset_t;
         sigemptyset(*sig_mask);
         sigaddset(*sig_mask, signal);
