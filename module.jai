@@ -498,8 +498,10 @@ handle_request :: (request: *Request) {
         }
 
         path_info := cast(*Type_Info_Struct) entry.route.path_type;
-        log("Path info: %", <<path_info);
-        path_params := alloc(path_info.runtime_size);
+        if path_info.type == .STRUCT {
+            log("Path info: %", <<path_info);
+            path_params := alloc(path_info.runtime_size);
+        }
 
         // @ToDo: Parse arguments
         entry.route.handler(request, null);
