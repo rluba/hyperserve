@@ -1,3 +1,10 @@
+// @ToDO:
+// - Parse parameters into route argument structs and pass them to the handler
+// - Put response handling into a thread pool
+// - Offer more response options (custom headers, …)
+// - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
+
+
 HANDLE_INVALID :: -1;
 
 Server :: struct {
