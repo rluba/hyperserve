@@ -248,6 +248,7 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
 
     builder: String_Builder;
     defer free_buffers(*builder);
+    // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
     print_to_builder(*builder, "HTTP/1.1 % %\r\n", cast(int) status_code, get_reason_string(status_code));
     print_to_builder(*builder, "content-length: %\r\n", response.count);
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
@@ -531,11 +532,13 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
     found, request.url, http_version = split_from_left(remainder, #char " ");
     if http_version != "HTTP/1.1" {
         log_error("Unsupported HTTP version: %", http_version);
+        respond("", .HTTP_VERSION_NOT_SUPPORTED);
         return false;
     }
 
     if !request.url || request.url[0] != #char "/" {
         log_error("Bad request URL: %", request.url);
+        respond("Malformed request URL", .BAD_REQUEST);
         return false;
     }
 
@@ -549,6 +552,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
         found, name, value := split_from_left(header, #char ":");
         if !found {
             log_error("Bad request header: %", header);
+            respond("Malformed request header", .BAD_REQUEST);
             return false;
         }
 
