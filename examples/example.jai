@@ -47,10 +47,25 @@ main :: () {
             log("Got ping request with path: %", request.url);
             // @ToDo: reply
         });
-        success &= add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(struct {id: u64; upload_id: u64; path: string; not_used := "Bad";})) {
-            log("Got members request with parameters: %", parameters.path);
-            // @ToDo: reply
-        });
+        {
+            Path_Params :: struct {
+                id: u64;
+                upload_id: int;
+                path: string;
+                not_used := "Bad";
+            }
+            Query_Params :: struct {
+                arg1: string;
+                arg2: string;
+                arg3 := 1;
+            }
+            success &= add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(Path_Params, Query_Params)) {
+                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1; 
+                log("Got members request with parameters: %", <<parameters);
+                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 5; 
+                // @ToDo: reply
+            });
+        }
         if !success exit(1);
 
         debug_print_routes(*server);

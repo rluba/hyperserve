@@ -1,5 +1,4 @@
-// @ToDO:
-// - Parse parameters into route argument structs and pass them to the handler
+// @ToDo:
 // - Put response handling into a thread pool
 // - Offer more response options (custom headers, …)
 // - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
@@ -584,25 +583,28 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
 }
 
 handle_request :: (request: *Request) {
+    verbose := context.hyperserve.server.verbose;
     node := table_find_pointer(*context.hyperserve.server.routes, request.method);
     if !node {
         log_error("No routes for method %", request.method);
+        respond("", .NOT_FOUND);
         return;
     }
 
-    found, path, query := split_from_left(request.url, #char "?");
+    found, path, remainder := split_from_left(request.url, #char "?");
+    query: string;
+    fragment: string; // Ignored
+    found, query, fragment = split_from_left(remainder, #char "#");
     {
-        found, entry, path_parameter_values := find_route(node, path);
+        success, found, entry, path_parameter_values := find_route(node, path);
+        if !success {
+            log_error("Invalid url: % %", request.method, path);
+            respond("Malformed request URL", .BAD_REQUEST);
+        }
         if !found {
             log_error("No route for % %", request.method, path);
+            respond("", .NOT_FOUND);
             return;
-        }
-
-        log("Found route with path parameters:");
-        assert(path_parameter_values.count == entry.parameters.count);
-        for name: entry.parameters {
-            value := path_parameter_values[it_index];
-            log("\t%: %", name, value);
         }
 
         parameters_info := entry.route.parameters_info;
@@ -629,10 +631,50 @@ handle_request :: (request: *Request) {
                 }
             }
 
-            any: Any;
-            any.type = path_info;
-            any.value_pointer = path_data;
-            log("Parsed params: %", any);
+            if verbose {
+                any: Any;
+                any.type = path_info;
+                any.value_pointer = path_data;
+                log("Parsed path params: %", any);
+            }
+        }
+
+        query_member, query_member_offset := get_field(parameters_info, "query");
+        assert(query_member != null);
+        query_info := cast(*Type_Info_Struct) query_member.type;
+        if query_info.type == .STRUCT {
+            query_data := params + query_member_offset;
+            remainder := query;
+            while remainder {
+                found: bool;
+                part: string;
+                found, part, remainder = split_from_left(remainder, #char "&");
+                if !part continue; // Allow empty query part. We could also complain…
+
+                equals_found, raw_name, raw_value := split_from_left(part, #char "=");
+                if !raw_name || !equals_found {
+                    respond("Malformed query", .BAD_REQUEST);
+                    return;
+                }
+
+                success, name := decode_uri_component(raw_name);
+                value: string;
+                success, value = decode_uri_component(raw_value);
+
+                error_message: string;
+                success, error_message = parse_value(query_data, query_info, name, value);
+                if !success {
+                    respond(tprint("Query parameter \"%\": %", name, error_message), .BAD_REQUEST);
+                    return;
+                }
+            }
+
+            if verbose {
+                any: Any;
+                any.type = query_info;
+                any.value_pointer = query_data;
+                log("Parsed query params: %", any);
+            }
         }
 
         entry.route.handler(request, params);
@@ -640,22 +682,21 @@ handle_request :: (request: *Request) {
 }
 
 // @Cleanup, @Speed: The parameter handling and array stuff is very, very silly atm.
-find_route :: (node: *Routing_Node, path: string) -> found: bool, entry: Routing_Node.Entry, parameter_strings: [..] string {
+find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool, entry: Routing_Node.Entry, parameter_strings: [..] string {
     log("Trying to find route for \"%\" in %", path, <<node);
     parameter_strings: [..] string;
 
     if !path {
         log_error("Not at an edge but there’s no more path left");
-        return false, .{}, parameter_strings;
+        return true, false, .{}, parameter_strings;
     }
-
 
     assert(path != "");
     fixed := table_find_pointer(*node.fixed, path);
     if fixed {
         log("Found a fixed handler!");
         array_reserve(*parameter_strings, fixed.parameters.count);
-        return true, fixed, parameter_strings;
+        return true, true, fixed, parameter_strings;
     }
 
     next_slash_index := find_index_from_left(path, #char "/", 1);
@@ -668,35 +709,89 @@ find_route :: (node: *Routing_Node, path: string) -> found: bool, entry: Routing
         segment = slice(path, 1, next_slash_index - 1);
         remainder = slice(path, next_slash_index, path.count - next_slash_index);
     }
-    literal_node := table_find_pointer(*node.literal, segment);
-    if literal_node {
-        log("Found literal node for \"%\"", segment);
-        found, entry, params := find_route(<<literal_node, remainder);
-        return found, entry, params;
-    }
+    success, decoded_segment := decode_uri_component(segment);
+    if !success return false, false, .{}, parameter_strings;
 
+    literal_node := table_find_pointer(*node.literal, decoded_segment);
+    if literal_node {
+        log("Found literal node for \"%\"", decoded_segment);
+        success, found, entry, params := find_route(<<literal_node, remainder);
+        return success, found, entry, params;
+    }
 
     if !remainder && node.edge.route.path {
         array_reserve(*parameter_strings, node.edge.parameters.count);
-        array_add(*parameter_strings, segment);
-        return true, node.edge, parameter_strings;
+        array_add(*parameter_strings, decoded_segment);
+        return true, true, node.edge, parameter_strings;
     }
 
     if node.parameter {
-        log("Found parameter node for \"%\"", segment);
-        found, entry, params := find_route(node.parameter, remainder);
-        array_insert_at(*params, segment, 0);
-        return found, entry, params;
+        log("Found parameter node for \"%\"", decoded_segment);
+        success, found, entry, params := find_route(node.parameter, remainder);
+        if !success return false, false, .{}, parameter_strings;
+
+        array_insert_at(*params, decoded_segment, 0);
+        return success, found, entry, params;
     }
 
     if node.wildcard.route.path {
         array_reserve(*parameter_strings, node.wildcard.parameters.count);
-        array_add(*parameter_strings, slice(path, 1, path.count - 1));
-        return true, node.wildcard, parameter_strings;
+        raw_value := slice(path, 1, path.count - 1);
+        // @ToDo: We decode the wildcard part before passing it to the handler.
+        // There could be instances where the handler wants the raw value because decoding slashes in the wildcard part
+        // changes the meaning of the path!
+        success, decoded := decode_uri_component(raw_value);
+        if !success return false, false, .{}, parameter_strings;
+
+        array_add(*parameter_strings, decoded);
+        return true, true, node.wildcard, parameter_strings;
     }
 
     log_error("Could not find a matching route for sub-path \"%\"", path);
-    return false, .{}, parameter_strings;
+    return true, false, .{}, parameter_strings;
+}
+
+decode_uri_component :: (part: string) -> bool, string {
+    index := find_index_from_left(part, #char "%");
+    if index == -1  return true, part;
+
+    builder: String_Builder;
+    remainder := part;
+    while index != -1 {
+        if index + 3 > remainder.count return false, "";
+
+        left := slice(remainder, 0, index);
+        string_value := slice(remainder, index + 1, 2);
+        remainder = slice(remainder, index + 3, remainder.count - index - 3);
+
+        int_value, success, int_remainder := string_to_int(string_value, base = 16, u64);
+        if !success || int_remainder return false, "";
+
+        append(*builder, left);
+        append(*builder, cast(u8) int_value);
+        index = find_index_from_left(remainder, #char "%");
+    }
+    append(*builder, remainder);
+
+    return true, builder_to_string(*builder);
+}
+
+#run {
+    success, result := decode_uri_component("%");
+    assert(!success, "Result was \"%\"", result);
+    success, result = decode_uri_component("%2");
+    assert(!success, "Result was \"%\"", result);
+    success, result = decode_uri_component("%20");
+    assert(success);
+    assert(result == " ", "Result was \"%\"", result);
+    success, result = decode_uri_component("%20%20");
+    assert(success);
+    assert(result == "  ", "Result was \"%\"", result);
+    success, result = decode_uri_component("%20%0");
+    assert(!success, "Result was \"%\"", result);
+    success, result = decode_uri_component("pseudo%2fpath");
+    assert(success);
+    assert(result == "pseudo/path", "Result was \"%\"", result);
 }
 
 // client_thread_group: Thread_Group;
@@ -751,7 +846,9 @@ parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string
     success := true;
 
     info_member, member_offset := get_field(struct_info, member_name);
-    assert(info_member != null);
+    if !info_member {
+        return false, "Unknown parameter";
+    }
 
     member_data := data + member_offset;
 
