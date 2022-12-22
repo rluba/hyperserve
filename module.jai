@@ -1,5 +1,8 @@
 // @ToDo:
 // - Put response handling into a thread pool
+// - Decode bodies
+// - Offer option to stream the body instead of decoding it?
+// - Add option to limit body size
 // - Offer more response options (custom headers, …)
 // - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
 
