@@ -315,7 +315,6 @@ get_reason_string :: (code: Status_Code) -> string {
     return "Unknown Status Code";
 }
 
-
 handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
     assert(server == *context.hyperserve.server);
     if is_signal {
@@ -577,7 +576,6 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
         }
     }
 
-    // @ToDo: Handle request
     handle_request(request);
 
     remove_client(server, client); // @Incomplete
@@ -594,27 +592,47 @@ handle_request :: (request: *Request) {
 
     found, path, query := split_from_left(request.url, #char "?");
     {
-        found, entry, parameters := find_route(node, path);
+        found, entry, path_parameter_values := find_route(node, path);
         if !found {
             log_error("No route for % %", request.method, path);
             return;
         }
 
-        log("Found route with parameters:");
-        assert(parameters.count == entry.parameters.count);
-        for parameters {
-            name := entry.parameters[it_index];
-            log("\t%: %", name, it);
+        log("Found route with path parameters:");
+        assert(path_parameter_values.count == entry.parameters.count);
+        for name: entry.parameters {
+            value := path_parameter_values[it_index];
+            log("\t%: %", name, value);
         }
+
+        params: Request_Parameters();
 
         path_info := cast(*Type_Info_Struct) entry.route.path_type;
         if path_info.type == .STRUCT {
-            log("Path info: %", <<path_info);
-            path_params := alloc(path_info.runtime_size);
+            params.path = alloc(path_info.runtime_size);
+            if path_info.initializer {
+                path_info.initializer(params.path);
+            } else {
+                memset(params.path, 0, path_info.runtime_size);
+            }
+
+            assert(path_parameter_values.count == entry.parameters.count);
+            for name: entry.parameters {
+                value := path_parameter_values[it_index];
+                success, error_message := parse_value(params.path, path_info, name, value);
+                if !success {
+                    respond(tprint("Path parameter \"%\": %", name, error_message), .BAD_REQUEST);
+                    return;
+                }
+            }
+
+            any: Any;
+            any.type = path_info;
+            any.value_pointer = params.path;
+            log("Parsed params: %", any);
         }
 
-        // @ToDo: Parse arguments
-        entry.route.handler(request, null);
+        entry.route.handler(request, *params);
     }
 }
 
@@ -678,20 +696,6 @@ find_route :: (node: *Routing_Node, path: string) -> found: bool, entry: Routing
     return false, .{}, parameter_strings;
 }
 
-read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
-    bytes_read := read(handle, buffer.data, cast(u64) buffer.count);
-    if bytes_read < 0 {
-        read_error := errno();
-        if read_error == EAGAIN || read_error == EWOULDBLOCK {
-            return true, 0;
-        }
-
-        return false, 0;
-    }
-
-    return true, bytes_read;
-}
-
 // client_thread_group: Thread_Group;
 
 // init_client_thread_group :: () {
@@ -740,7 +744,70 @@ read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
 //     }
 // }
 
+parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string, to_parse: string) -> success: bool, error_message: string {
+    success := true;
+
+    info_member, member_offset := get_field(struct_info, member_name);
+    assert(info_member != null);
+
+    member_data := data + member_offset;
+
+    if info_member.type.type == {
+        // @Incomplete
+        case .INTEGER;
+            // @Incomplete: We should parse this differently based on signedness!
+            int_value, success, remainder := to_integer(to_parse);
+            if !success || remainder return false, "Value is not a valid integer.";
+
+            int_info := cast(*Type_Info_Integer) info_member.type;
+            if int_info.signed {
+                valid, low, high := Reflection.range_check_and_store(int_value, int_info, member_data);
+                if !valid return false, tprint("Value must be between % and %", low, high);
+            } else {
+                valid, low, high := Reflection.range_check_and_store(cast(u64) int_value, int_info, member_data);
+                if !valid return false, tprint("Value must be between % and %", low, high);
+            }
+            return true, "";
+        // case .FLOAT;
+        // case .BOOL;
+        case .STRING;
+            dest := cast(*string) member_data;
+            <<dest = to_parse;
+            return true, "";
+        // case .ENUM;
+        // case .POINTER;
+        // case .PROCEDURE;
+        // case .VOID;
+        // case .STRUCT;
+        // case .ARRAY;
+        // case .OVERLOAD_SET;
+        // case .ANY;
+        // case .POLYMORPHIC_VARIABLE;
+        // case .TYPE;
+        // case .CODE;
+        // case .VARIANT;
+        case;
+            log_error("@Incomplete: Parsing parameters of type % is not yet supported", info_member.type.type);
+            return false, "Internal parser error";
+    }
+}
+
 #scope_module
+
+read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
+    bytes_read := read(handle, buffer.data, cast(u64) buffer.count);
+    if bytes_read < 0 {
+        read_error := errno();
+        if read_error == EAGAIN || read_error == EWOULDBLOCK {
+            return true, 0;
+        }
+
+        return false, 0;
+    }
+
+    return true, bytes_read;
+}
+
 
 #import "Basic";
 #import "Bucket_Array";
@@ -749,7 +816,8 @@ read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
 #import "Thread";
 #import "Socket";
 #import "String";
-System :: #import "System";
+System     :: #import "System";
+Reflection :: #import "Reflection";
 
 #if OS != .WINDOWS {
     #import "POSIX";

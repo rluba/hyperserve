@@ -1,7 +1,7 @@
-Request_Parameters :: struct (Path: Type, Query: Type, Payload: Type) {
-    path: Path;
-    query: Query;
-    payload: Payload;
+Request_Parameters :: struct (Path: Type = void, Query: Type = void, Payload: Type = void) {
+    path:    *Path;
+    query:   *Query;
+    payload: *Payload;
 
     // @ToDo: Optionally allow query and payload arguments not part of the types above:
     // query_extra: Table(string, string);
@@ -9,12 +9,12 @@ Request_Parameters :: struct (Path: Type, Query: Type, Payload: Type) {
 }
 
 Route :: struct {
-    path: string;
-    path_type: Type;
-    query_type: Type;
-    payload_type: Type;
+    path:         string;
+    path_type:    *Type_Info;
+    query_type:   *Type_Info;
+    payload_type: *Type_Info;
 
-    handler: #type (request: *Request, parameters: *void);
+    handler:      #type (request: *Request, parameters: *void);
 }
 
 Route_Segment :: struct {
@@ -46,7 +46,9 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
     // … but then we can’t generate paths at run-time (eg. by configuring a prefix)
     if parameters {
         Path_Type :: type_of(T.path);
-        info := cast(*Type_Info_Struct) type_info(Path_Type);
+        pointer_info := cast(*Type_Info_Pointer) type_info(Path_Type);
+        assert(pointer_info.type == .POINTER);
+        info := cast(*Type_Info_Struct) pointer_info.pointer_to;
         if info.type != .STRUCT {
             log_error("Path type must be a struct");
             return false;
@@ -79,9 +81,9 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
     entry.parameters = parameters;
     entry.segments = segments;
     entry.route.path = path;
-    entry.route.path_type = type_of(T.path);
-    entry.route.query_type = type_of(T.query);
-    entry.route.payload_type = type_of(T.payload);
+    entry.route.path_type    = type_info(type_of(T.path)).pointer_to;
+    entry.route.query_type   = type_info(type_of(T.query)).pointer_to;
+    entry.route.payload_type = type_info(type_of(T.payload)).pointer_to;
     entry.route.handler = xx handler;
 
     if parameters.count == parameter_index {

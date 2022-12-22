@@ -15,7 +15,6 @@ init :: (group: *Wait_Group) -> success: bool {
         if group.kevent_queue == -1 {
             error_code, error_string := System.get_error_value_and_string();
             log_error("Could not create event queue: % %", error_code, error_string);
-            deinit(group);
             return false;
         }
     }
@@ -113,7 +112,6 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
         if result == -1 {
             error_code, error_string := System.get_error_value_and_string();
             log_error("Could not remove handle % with the event queue: % %", handle, error_code, error_string);
-            deinit(group);
             return false;
         }
     }
