@@ -47,8 +47,8 @@ main :: () {
             log("Got ping request with path: %", request.url);
             // @ToDo: reply
         });
-        success &= add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(struct {id: int; upload_id: int; path: string; not_used := "Bad";})) {
-            log("Got members request with parameters: %", <<parameters.path);
+        success &= add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(struct {id: u64; upload_id: u64; path: string; not_used := "Bad";})) {
+            log("Got members request with parameters: %", parameters.path);
             // @ToDo: reply
         });
         if !success exit(1);

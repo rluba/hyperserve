@@ -605,21 +605,24 @@ handle_request :: (request: *Request) {
             log("\t%: %", name, value);
         }
 
-        params: Request_Parameters();
+        parameters_info := entry.route.parameters_info;
+        params := alloc(parameters_info.runtime_size);
+        if parameters_info.initializer {
+            parameters_info.initializer(params);
+        } else {
+            memset(params, 0, parameters_info.runtime_size);
+        }
 
-        path_info := cast(*Type_Info_Struct) entry.route.path_type;
+        path_member, path_member_offset := get_field(parameters_info, "path");
+        assert(path_member != null);
+        path_info := cast(*Type_Info_Struct) path_member.type;
         if path_info.type == .STRUCT {
-            params.path = alloc(path_info.runtime_size);
-            if path_info.initializer {
-                path_info.initializer(params.path);
-            } else {
-                memset(params.path, 0, path_info.runtime_size);
-            }
+            path_data := params + path_member_offset;
 
             assert(path_parameter_values.count == entry.parameters.count);
             for name: entry.parameters {
                 value := path_parameter_values[it_index];
-                success, error_message := parse_value(params.path, path_info, name, value);
+                success, error_message := parse_value(path_data, path_info, name, value);
                 if !success {
                     respond(tprint("Path parameter \"%\": %", name, error_message), .BAD_REQUEST);
                     return;
@@ -628,11 +631,11 @@ handle_request :: (request: *Request) {
 
             any: Any;
             any.type = path_info;
-            any.value_pointer = params.path;
+            any.value_pointer = path_data;
             log("Parsed params: %", any);
         }
 
-        entry.route.handler(request, *params);
+        entry.route.handler(request, params);
     }
 }
 
@@ -755,16 +758,18 @@ parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string
     if info_member.type.type == {
         // @Incomplete
         case .INTEGER;
-            // @Incomplete: We should parse this differently based on signedness!
-            int_value, success, remainder := to_integer(to_parse);
-            if !success || remainder return false, "Value is not a valid integer.";
-
             int_info := cast(*Type_Info_Integer) info_member.type;
             if int_info.signed {
+                int_value, success, remainder := string_to_int(to_parse, T = s64);
+                if !success || remainder return false, "Value is not a valid signed integer.";
+
                 valid, low, high := Reflection.range_check_and_store(int_value, int_info, member_data);
                 if !valid return false, tprint("Value must be between % and %", low, high);
             } else {
-                valid, low, high := Reflection.range_check_and_store(cast(u64) int_value, int_info, member_data);
+                int_value, success, remainder := string_to_int(to_parse, T = u64);
+                if !success || remainder return false, "Value is not a valid unsigned integer.";
+
+                valid, low, high := Reflection.range_check_and_store(int_value, int_info, member_data);
                 if !valid return false, tprint("Value must be between % and %", low, high);
             }
             return true, "";
