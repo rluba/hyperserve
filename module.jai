@@ -36,13 +36,14 @@ Client :: struct {
 
     next_request_index: int;
 
+    received_eof: bool;
+    remove_after_request: bool;
+
     // Request data
     request_pool: *Pool;
     pending_data: String_Builder;
     header_end_offsets: [..] int;
     was_cr: bool;
-    received_eof: bool;
-    remove_after_request: bool;
     num_pending_newlines: int;
 }
 
@@ -112,38 +113,6 @@ deinit :: (using server: *Server) {
     close_and_reset(*sigterm_handle);
     close_and_reset(*request_done_read_handle);
     close_and_reset(*request_done_write_handle);
-}
-
-// Print route tree for debugging
-debug_print_routes :: (server: *Server) {
-    for node, method: server.routes {
-        print("%:\n", method);
-        print_node(*node, 1);
-        print_node :: (node: *Routing_Node, depth: int) {
-            for node.fixed {
-                for 0..depth - 1 print("    ");
-                print("%\n", it_index);
-            }
-            for node.literal {
-                for 0..depth - 1 print("    ");
-                print("/%:\n", it_index);
-                print_node(it, depth + 1);
-            }
-            if node.wildcard.route.path {
-                for 0..depth - 1 print("    ");
-                print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
-            }
-            if node.edge.route.path {
-                for 0..depth - 1 print("    ");
-                print("/{%}\n", node.edge.parameters[node.edge.parameters.count - 1]);
-            }
-            if node.parameter {
-                for 0..depth - 1 print("    ");
-                print("/{param_%}:\n", node.parameter_index);
-                print_node(node.parameter, depth + 1);
-            }
-        }
-    }
 }
 
 listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
@@ -279,7 +248,7 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
     using context.hyperserve;
 
     if request.response_status_code {
-        log_error("Trying to send a response to request %, but a response was already sent!", request.id);
+        log_error("Trying to send a response to request %, but a % response was already sent!", request.id, request.response_status_code);
         return;
     }
 
@@ -320,10 +289,44 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
     }
 }
 
+// Print route tree for debugging
+debug_print_routes :: (server: *Server) {
+    for node, method: server.routes {
+        print("%:\n", method);
+        print_node(*node, 1);
+        print_node :: (node: *Routing_Node, depth: int) {
+            for node.fixed {
+                for 0..depth - 1 print("    ");
+                print("%\n", it_index);
+            }
+            for node.literal {
+                for 0..depth - 1 print("    ");
+                print("/%:\n", it_index);
+                print_node(it, depth + 1);
+            }
+            if node.wildcard.route.path {
+                for 0..depth - 1 print("    ");
+                print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
+            }
+            if node.edge.route.path {
+                for 0..depth - 1 print("    ");
+                print("/{%}\n", node.edge.parameters[node.edge.parameters.count - 1]);
+            }
+            if node.parameter {
+                for 0..depth - 1 print("    ");
+                print("/{param_%}:\n", node.parameter_index);
+                print_node(node.parameter, depth + 1);
+            }
+        }
+    }
+}
+
+
 #load "wait.jai";
 #load "routes.jai";
 
 #scope_file
+
 
 push_client :: (client: *Client) #expand {
     old_client     := context.hyperserve.client;
@@ -337,6 +340,15 @@ push_request :: (request: *Request) #expand {
     context.hyperserve.request  = request;
 
     `defer context.hyperserve.request = old_request;
+}
+
+reset_client_after_request :: (using client: *Client) {
+    reset(*pending_data);
+    array_reset(*header_end_offsets);
+    was_cr = false;
+    num_pending_newlines = 0;
+
+    reset(request_pool);
 }
 
 get_reason_string :: (code: Status_Code) -> string {
@@ -425,6 +437,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
                 remove_client(server, client);
             } else {
                 // Re-queue the client
+                reset_client_after_request(client);
                 add_handles(*server.wait_group, client.socket);
             }
         }
@@ -696,7 +709,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
 
         found, name, value := split_from_left(header, #char ":");
         if !found {
-            log_error("Bad request header: %", header);
+            log_error("Bad request header: \"%\"", header);
             respond("Malformed request header", .BAD_REQUEST);
             return false;
         }
