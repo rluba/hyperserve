@@ -15,7 +15,7 @@ main :: () {
         exit(1);
     }
 
-    using context.hyperserve;
+    server: Server;
     server.verbose = args.verbose;
 
     {
@@ -23,10 +23,14 @@ main :: () {
             log("Got root request!");
             respond("pretend this is index.html", content_type = "text/html");
         });
+        success &= add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters()) {
+            respond("pong", content_type = "text/plain");
+        });
         success &= add_route(*server, .POST, "/", (request: *Request, parameters: *Request_Parameters()) {
             log("Got root POST!");
             respond("Something was wrong with your post", 422);
         });
+
         success &= add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters()) {
             log("Got long path request!");
             // @ToDo: reply
@@ -39,14 +43,11 @@ main :: () {
             log("Got path request: %", request.url);
             // @ToDo: reply
         });
-        success &= add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters()) {
-            log("Got ping request!");
-            // @ToDo: reply
-        });
         success &= add_route(*server, .GET, "/ping/{path*}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
             log("Got ping request with path: %", request.url);
             // @ToDo: reply
         });
+
         {
             Path_Params :: struct {
                 id: u64;
@@ -78,7 +79,10 @@ main :: () {
 
     while !server.should_quit {
         update(*server);
+        reset_temporary_storage();
     }
+
+    shutdown(*server);
 
     deinit(*server);
 }

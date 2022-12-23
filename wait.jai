@@ -129,7 +129,13 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bo
         poll_timeout_ms := cast(s32) timeout_ms;
         num_events := poll(group.poll_fds.data, cast(u64) group.poll_fds.count, poll_timeout_ms);
         if num_events == -1 {
-            error_code, error_string := System.get_error_value_and_string();
+            error_code := System.get_error_value();
+            if error_code == EINTR || error_code == EAGAIN {
+                // Got interrupted, try again.
+                return true;
+            }
+
+            error_string := System.get_error_string(error_code);
             log_error("Couldn't poll events: % %", error_code, error_string);
             return false, 0, 0;
         }
@@ -166,7 +172,13 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bo
         events: [2] Kevent64;
         num_events := kevent64(group.kevent_queue, null, 0, events.data, events.count, 0, timeout_spec_pointer);
         if num_events == -1 {
-            error_code, error_string := System.get_error_value_and_string();
+            error_code := System.get_error_value();
+            if error_code == EINTR || error_code == EAGAIN {
+                // Got interrupted, try again.
+                return true;
+            }
+
+            error_string := System.get_error_string(error_code);
             log_error("Could not read events from the event queue: % %\n", error_code, error_string);
             return false;
         }

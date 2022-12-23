@@ -1,10 +1,13 @@
 // @ToDo:
-// - Put response handling into a thread pool
-// - Decode bodies
+// - Respect connection: close/keep-alive after finishing a request
+// - Decode bodies (JSON, multipart, …)
+// - Declare the accepted content types for body parsing as route options
 // - Offer option to stream the body instead of decoding it?
 // - Add option to limit body size
 // - Offer more response options (custom headers, …)
 // - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
+// - Support for transfer-encoding: chunked
+// …
 
 
 HANDLE_INVALID :: -1;
@@ -21,9 +24,13 @@ Server :: struct {
     clients:        Bucket_Array(Client, 64);
 
     routes:         Table(Http_Method, Routing_Node);
+    request_thread_group: Thread_Group;
+    request_done_read_handle:  s32 = HANDLE_INVALID;
+    request_done_write_handle: s32 = HANDLE_INVALID;
 }
 
 Client :: struct {
+    server: *Server;
     name: string;
     socket: s32 = HANDLE_INVALID;
     address: sockaddr_in;
@@ -35,10 +42,12 @@ Client :: struct {
     pending_data: String_Builder;
     header_end_offsets: [..] int;
     was_cr: bool;
+    eof_reached: bool;
     num_pending_newlines: int;
 }
 
 Request :: struct {
+    client: *Client;
     pool: *Pool;
     id: string;
     header_data: string;
@@ -54,7 +63,7 @@ Request :: struct {
 }
 
 Hyperserve_Context :: struct {
-    server: Server;
+    server: *Server;
     client: *Client;
     request: *Request;
 }
@@ -85,8 +94,15 @@ Http_Method :: enum {
     OPTIONS;
 }
 
+shutdown :: (using server: *Server, timeout_milliseconds: s32 = 60 * 1000) {
+    if request_thread_group.initted && !request_thread_group.should_exit {
+        shutdown(*request_thread_group, timeout_milliseconds);
+    }
+}
+
 deinit :: (using server: *Server) {
-    // @ToDo: Give clients a chance to finish
+    shutdown(server, 0);
+
     for * clients {
         remove_client(server, it);
     }
@@ -97,6 +113,8 @@ deinit :: (using server: *Server) {
     close_and_reset(*sigint_handle);
     close_and_reset(*sigquit_handle);
     close_and_reset(*sigterm_handle);
+    close_and_reset(*request_done_read_handle);
+    close_and_reset(*request_done_write_handle);
 }
 
 // Print route tree for debugging
@@ -131,7 +149,7 @@ debug_print_routes :: (server: *Server) {
     }
 }
 
-listen :: (server: *Server, port: u16) -> bool {
+listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     // @ToDo: IPv6
     // @ToDo: optionally restrict interface
     server.socket = socket(AF_INET, .STREAM, 0);
@@ -185,7 +203,18 @@ listen :: (server: *Server, port: u16) -> bool {
         return false;
     }
 
-    success = add_handles(*server.wait_group, server.socket);
+    worker_pipes:          [2] s32;
+    result = pipe(*worker_pipes);
+    if result != 0 {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Could not create worker pipe: % %", error_code, error_string);
+        return false;
+    }
+
+    server.request_done_read_handle  = worker_pipes[0];
+    server.request_done_write_handle = worker_pipes[1];
+
+    success = add_handles(*server.wait_group, server.socket, server.request_done_read_handle);
     if !success {
         deinit(server);
         return false;
@@ -198,6 +227,9 @@ listen :: (server: *Server, port: u16) -> bool {
         deinit(server);
         return false;
     }
+
+
+    init_request_thread_group(server, num_threads);
 
     return true;
 }
@@ -218,6 +250,7 @@ Status_Code :: enum {
     UNAUTHORIZED                    :: 401;
     FORBIDDEN                       :: 403;
     NOT_FOUND                       :: 404;
+    METHOD_NOT_ALLOWED              :: 405;
     CONFLICT                        :: 409;
     PAYLOAD_TOO_LARGE               :: 413;
     UNSUPPORTED_MEDIA_TYPE          :: 415;
@@ -234,15 +267,15 @@ code :: (status_code: int) -> Status_Code {
     return xx status_code;
 }
 
-update :: (server: *Server) -> bool{
-    success := wait_for_events(*server.wait_group, server, handle_event);
+update :: (using server: *Server) -> bool{
+    success := wait_for_events(*wait_group, server, handle_event);
     if !success {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t wait for events. Exiting…");
-        server.should_quit = true;
+        should_quit = true;
     }
 
-    return server.should_quit;
+    return should_quit;
 }
 
 respond :: (response: string, status_code := Status_Code.OK, content_type := "text/plain") {
@@ -303,6 +336,7 @@ get_reason_string :: (code: Status_Code) -> string {
         case .UNAUTHORIZED;                    return "Unauthorized";
         case .FORBIDDEN;                       return "Forbidden";
         case .NOT_FOUND;                       return "Not Found";
+        case .METHOD_NOT_ALLOWED;              return "Method Not Allowed";
         case .CONFLICT;                        return "Conflict";
         case .PAYLOAD_TOO_LARGE;               return "Payload Too Large";
         case .UNSUPPORTED_MEDIA_TYPE;          return "Unsupported Media Type";
@@ -318,7 +352,7 @@ get_reason_string :: (code: Status_Code) -> string {
 }
 
 handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
-    assert(server == *context.hyperserve.server);
+    assert(server == context.hyperserve.server);
     if is_signal {
         if handle == {
             case SIGINT; 
@@ -350,6 +384,32 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
         }
 
         add_client(server, client_socket, client_addr);
+    } else if handle == server.request_done_read_handle {
+        // @Speed: get_completed_work is very, very wasteful if you have lots of workers and
+        // little completed work, which is the case here under low load.
+        // We should probably use our own thread pool instead, eventually.
+        completed_work := get_completed_work(*server.request_thread_group);
+        for work: completed_work {
+            log("Got completed work");
+
+            data: u8;
+            result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
+            if result == -1 {
+                error_code, error_string := System.get_error_value_and_string();
+                log_error("Could not read from pipe: % %", error_code, error_string);
+            } else {
+                assert(result == 1);
+            }
+
+            request := cast(*Request) work;
+            client := request.client;
+            if client.eof_reached {
+                remove_client(server, client);
+            } else {
+                // Re-queue the client
+                add_handles(*server.wait_group, client.socket);
+            }
+        }
     } else {
         // Clients…
         client: *Client;
@@ -359,8 +419,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
                 break;
             }
         }
-
-        if client.socket == HANDLE_INVALID {
+        if !client {
             log_error("Could not find client for handle %", handle);
             return;
         }
@@ -373,6 +432,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
 add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) -> success: bool {
     // ToDo: Create an allocator for this client (and also use it for the name)
     client := find_and_occupy_empty_slot(*server.clients);
+    client.server = server;
     client.name = to_string(client_addr);
     client.socket = client_socket;
     client.address = client_addr;
@@ -419,6 +479,13 @@ deinit :: (client: *Client) {
 
 handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
     should_remove := false;
+
+    if is_eof {
+        log("Client % closed the connection.", client.name);
+        client.eof_reached = true;
+        should_remove = true;
+    }
+
     {
         push_allocator(pool_allocator_proc, client.request_pool);
 
@@ -456,10 +523,9 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
                             advance_through_ensured_space(*client.pending_data, i);
                             header_data := builder_to_string(*client.pending_data);
-                            success := parse_and_handle_request(server, client, header_data, pending_body, client.request_pool);
-                            if !success {
-                                should_remove = true;
-                            }
+                            should_remove = false;
+                            success := hand_off_client_request(server, client, header_data, pending_body);
+                            if !success should_remove = true;
                             break;
                     }
                 } else {
@@ -473,11 +539,6 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
             // @ToDo: Check agains max header size we want to allow!
         }
     }
-
-    if is_eof {
-        log("Client % closed the connection.", client.name);
-        should_remove = true;
-    }
     
     if should_remove {
         remove_client(server, client);
@@ -489,7 +550,7 @@ create_request_id :: (client: *Client) -> string {
     return sprint("%_%", client.name, client.next_request_index);
 }
 
-parse_and_handle_request :: (server: *Server, client: *Client, header_data: string, pending_body: String_Builder, pool: *Pool) -> success: bool {
+hand_off_client_request :: (using server: *Server, client: *Client, header_data: string, pending_body: String_Builder) -> success: bool {
     assert(client.header_end_offsets.count > 0);
     if !header_data {
         log_error("Client %: Empty header.", client.name);
@@ -497,12 +558,53 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
     }
 
     request := New(Request);
+    request.client = client;
     request.id = create_request_id(client);
-    request.pool = pool;
+    request.pool = client.request_pool;
     request.header_data = header_data;
     request.pending_body = pending_body;
+
+    // Further reading is done in the worker thread,
+    // so we don't want to wake up the server thread and read whenever the client sends more data
+    remove_handle(*wait_group, client.socket);
+
+    add_work(*request_thread_group, request);
+
+    return true;
+}
+
+thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) -> Thread_Continue_Status {
+    request := cast(*Request) work;
+    client := request.client;
+    server := client.server;
+
+    push_allocator(pool_allocator_proc, request.pool);
+    context.hyperserve.server = server;
+    push_client(client);
     push_request(request);
 
+    // @ToDo: remove client from the wait group and re-insert after the request got handled!
+    // @ToDo
+    success := parse_and_handle_request(server, client, request);
+    if !success client.eof_reached = true;
+
+    log("Finished request");
+
+    data: u8 = 1;
+    result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
+    if result == -1 {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Could not write to pipe: % %", error_code, error_string);
+    } else {
+        assert(result == 1);
+    }
+
+    reset_temporary_storage();
+
+    return .CONTINUE;
+}
+
+parse_and_handle_request :: (server: *Server, client: *Client, request: *Request) -> success: bool {
     offset := client.header_end_offsets[0];
     assert(offset <= request.header_data.count);
     request_line := to_string(request.header_data.data, offset);
@@ -513,6 +615,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
     found, method_string, remainder := split_from_left(request_line, #char " ");
     if !found {
         log_error("Bad request line: %", request_line);
+        respond("Malformed request line", .BAD_REQUEST);
         return false;
     }
 
@@ -526,6 +629,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
         case "OPTIONS"; request.method = .OPTIONS;
         case;
             log_error("Unsupported request method: %", method_string);
+            respond("Unsupported request method", .NOT_IMPLEMENTED);
             return false;
     }
 
@@ -579,8 +683,6 @@ parse_and_handle_request :: (server: *Server, client: *Client, header_data: stri
     }
 
     handle_request(request);
-
-    remove_client(server, client); // @Incomplete
 
     return true;
 }
@@ -797,53 +899,15 @@ decode_uri_component :: (part: string) -> bool, string {
     assert(result == "pseudo/path", "Result was \"%\"", result);
 }
 
-// client_thread_group: Thread_Group;
+init_request_thread_group :: (using server: *Server, num_threads: s32) {
+    init(*request_thread_group, num_threads, thread_handle_request);
 
-// init_client_thread_group :: () {
-//     // We want to make about as many threads as we have CPUs. More than that
-//     // will overwhelm our computer with context-switching waste work!
-//     num_cpus := get_number_of_processors();
+    request_thread_group.name    = "Hyperserve Requests";
+    request_thread_group.logging = server.verbose;
+    request_thread_group.data = server; // Do we need this?
 
-//     assert(num_cpus >= 1);
-
-//     #if (OS == .WINDOWS) || (OS == .LINUX) {
-//         // This routine reports hyperthreads, so, divide by two, because of Intel marketing.
-//         num_cpus /= 2;
-//     }
-
-//     if num_cpus > 200  num_cpus = 200;  // Clamp to a value that is reasonable as of 2021, in case we get weird data.
-
-//     // In a typical program, you want the "main thread" to be able to use a CPU, so,
-//     // only allocate as many threads as we have other CPUs.
-//     // Launch at least 2 threads, because for this example, we want to show multiple threads
-//     // running at the same time.
-//     num_threads := max(num_cpus - 1, 2);
-
-//     logprint("Thread Group Example", "This machine reports % CPUs; starting % threads.\n", num_cpus, num_threads);
-
-//     init(*client_thread_group, num_threads, thread_handle_client);
-
-//     // After initializing a Thread_Group, there are various data members you can set
-//     // to control behavior. See the definition of Thread_Group in modules/Thread.
-//     thread_group.name    = "Clients";
-//     thread_group.logging = true;
-
-//     {
-//         // You are free to set the Thread.user_data member on any of the threads created by the group.
-//         // But ... you have to do that before calling start(). Here we will just set a dummy user_data,
-//         // to show it's working.
-
-//         Dummy_Data :: struct {
-//             name := "Lord Dimwit Flathead the Excessive";
-//         }
-
-//         dummy_data := New(Dummy_Data);
-
-//         for * thread_group.worker_info {
-//             it.thread.data = *dummy_data;
-//         }
-//     }
-// }
+    start(*request_thread_group);
+}
 
 parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string, to_parse: string) -> success: bool, error_message: string {
     success := true;
@@ -911,6 +975,21 @@ read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
     }
 
     return true, bytes_read;
+}
+
+
+repeat_if_interrupted :: (call: Code) -> s64 #expand {
+    while true {
+        result := #insert call;
+        if result == -1 {
+            error_code := System.get_error_value();
+            if error_code == EINTR || error_code == EAGAIN {
+                // Got interrupted, try again.
+                continue;
+            }
+        }
+        return result;
+    }
 }
 
 
