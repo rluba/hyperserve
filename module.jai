@@ -4,7 +4,6 @@
 // - Offer option to stream the body instead of decoding it?
 // - Add option to limit body size
 // - Offer more response options (custom headers, …)
-// - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
 // - Support for transfer-encoding: chunked
 // - handle Http_Method.OPTIONS correctlty
 // …
@@ -66,6 +65,9 @@ Request :: struct {
     // @ToDo: More fields for commonly referenced headers
 
     pending_body: String_Builder;
+
+    start_time: Apollo_Time = APOLLO_TIME_INVALID;
+    response_status_code: Status_Code;
 }
 
 HTTP_1_0 :: "HTTP/1.0";
@@ -229,7 +231,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     return true;
 }
 
-Status_Code :: enum {
+Status_Code :: enum u16 {
     // @Incomplete
     OK                              :: 200;
     CREATED                         :: 201;
@@ -258,7 +260,7 @@ Status_Code :: enum {
     HTTP_VERSION_NOT_SUPPORTED      :: 505;
 }
 
-code :: (status_code: int) -> Status_Code {
+code :: (status_code: u16) -> Status_Code {
     return xx status_code;
 }
 
@@ -276,6 +278,13 @@ update :: (using server: *Server) -> bool{
 respond :: (response: string, status_code := Status_Code.OK, content_type := "text/plain") {
     using context.hyperserve;
 
+    if request.response_status_code {
+        log_error("Trying to send a response to request %, but a response was already sent!", request.id);
+        return;
+    }
+
+    request.response_status_code = status_code;
+
     builder: String_Builder;
     defer free_buffers(*builder);
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
@@ -289,6 +298,7 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
     if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false)); 
 
     // Actually send the response
+    // @ToDo: Do this in a blocking way instead of busy-looping!
     buffer := get_base_buffer(*builder);
     while buffer {
         data := get_buffer_data(buffer);
@@ -328,7 +338,6 @@ push_request :: (request: *Request) #expand {
 
     `defer context.hyperserve.request = old_request;
 }
-
 
 get_reason_string :: (code: Status_Code) -> string {
     if #complete code == {
@@ -378,7 +387,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
                 assert(false);
         }
     } else if handle == server.socket {
-        log("Receiving new connection");
+        if server.verbose log("Receiving new connection");
         if is_eof {
             log_error("Server socket was closed unexpectedly.");
             server.should_quit = true;
@@ -399,7 +408,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
         // We should probably use our own thread pool instead, eventually.
         completed_work := get_completed_work(*server.request_thread_group);
         for work: completed_work {
-            log("Got completed work");
+            if server.verbose log("Got completed work");
 
             data: u8;
             result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
@@ -456,7 +465,7 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
 
     push_client(client);
 
-    log("Hello %!", client.name);
+    if server.verbose log("Hello %!", client.name);
     success := add_handles(*server.wait_group, client_socket);
     if !success {
         log_error("Couldn’t add socket of client % to the server wait group.", client.name);
@@ -490,7 +499,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
     should_remove := false;
 
     if is_eof {
-        log("Client % closed the connection.", client.name);
+        if server.verbose log("Client % closed the connection.", client.name);
         client.received_eof = true;
         should_remove = true;
     }
@@ -508,7 +517,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
         if bytes_read {
             new_data := to_string(buffer.data, bytes_read);
-            log("Client % said: %", client.name, new_data);
+            if server.verbose log("Client % said: %", client.name, new_data);
 
             buffer_size := builder_string_length(*client.pending_data);
             for i: 0..bytes_read-1 {
@@ -524,7 +533,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
                             assert(end >= 0);
                             array_add(*client.header_end_offsets, end);
                         case 2; 
-                            log("Header complete!");
+                            if server.verbose log("Header complete!");
 
                             pending_body_data := to_string(buffer.data + i + 1, bytes_read - i - 1);
                             pending_body: String_Builder;
@@ -572,6 +581,7 @@ hand_off_client_request :: (using server: *Server, client: *Client, header_data:
     request.pool = client.request_pool;
     request.header_data = header_data;
     request.pending_body = pending_body;
+    request.start_time = current_time_monotonic();
 
     // Further reading is done in the worker thread,
     // so we don't want to wake up the server thread and read whenever the client sends more data
@@ -595,6 +605,11 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     success := parse_and_handle_request(server, client, request);
     if !success client.remove_after_request = true;
 
+    end := current_time_monotonic();
+    now := current_time_consensus();
+    now_string := calendar_to_iso_string(to_calendar(now));
+    log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(to_microseconds(end - request.start_time) / 1000.0, trailing_width = 2, zero_removal = .NO));
+
     data: u8 = 1;
     result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
     if result == -1 {
@@ -616,7 +631,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
     offset += 2; // CRLF
     
     // Parse request line
-    log("Request line: %", request_line);
+    if server.verbose log("Request line: %", request_line);
     found, method_string, remainder := split_from_left(request_line, #char " ");
     if !found {
         log_error("Bad request line: %", request_line);
@@ -691,7 +706,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
         value = trim(value);
 
         table_add(*request.headers, name, value);
-        log("Header %: %", name, value);
+        if server.verbose log("Header %: %", name, value);
         
         if name == {
             case "host";
@@ -747,6 +762,10 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
     }
 
     handle_request(request);
+    if !request.response_status_code {
+        log_error("Request handler for request % did not send a response.", request.id);
+        return false;
+    }
 
     return true;
 }
@@ -811,7 +830,7 @@ handle_request :: (request: *Request) {
                 any: Any;
                 any.type = path_info;
                 any.value_pointer = path_data;
-                log("Parsed path params: %", any);
+                if verbose log("Parsed path params: %", any);
             }
         }
 
@@ -849,7 +868,7 @@ handle_request :: (request: *Request) {
                 any: Any;
                 any.type = query_info;
                 any.value_pointer = query_data;
-                log("Parsed query params: %", any);
+                if verbose log("Parsed query params: %", any);
             }
         }
 
@@ -859,7 +878,7 @@ handle_request :: (request: *Request) {
 
 // @Cleanup, @Speed: The parameter handling and array stuff is very, very silly atm.
 find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool, entry: Routing_Node.Entry, parameter_strings: [..] string {
-    log("Trying to find route for \"%\" in %", path, <<node);
+    if context.hyperserve.server.verbose log("Trying to find route for \"%\" in %", path, <<node);
     parameter_strings: [..] string;
 
     if !path {
@@ -870,7 +889,6 @@ find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool,
     assert(path != "");
     fixed := table_find_pointer(*node.fixed, path);
     if fixed {
-        log("Found a fixed handler!");
         array_reserve(*parameter_strings, fixed.parameters.count);
         return true, true, fixed, parameter_strings;
     }
@@ -890,7 +908,6 @@ find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool,
 
     literal_node := table_find_pointer(*node.literal, decoded_segment);
     if literal_node {
-        log("Found literal node for \"%\"", decoded_segment);
         success, found, entry, params := find_route(<<literal_node, remainder);
         return success, found, entry, params;
     }
@@ -902,7 +919,6 @@ find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool,
     }
 
     if node.parameter {
-        log("Found parameter node for \"%\"", decoded_segment);
         success, found, entry, params := find_route(node.parameter, remainder);
         if !success return false, false, .{}, parameter_strings;
 

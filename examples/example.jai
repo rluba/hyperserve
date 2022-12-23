@@ -69,7 +69,7 @@ main :: () {
         }
         if !success exit(1);
 
-        debug_print_routes(*server);
+        if args.verbose debug_print_routes(*server);
     }
 
     success = listen(*server, port = args.port);
