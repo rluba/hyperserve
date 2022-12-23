@@ -352,7 +352,6 @@ get_reason_string :: (code: Status_Code) -> string {
 }
 
 handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
-    assert(server == context.hyperserve.server);
     if is_signal {
         if handle == {
             case SIGINT; 
