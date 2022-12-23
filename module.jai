@@ -1,5 +1,4 @@
 // @ToDo:
-// - Respect connection: close/keep-alive after finishing a request
 // - Decode bodies (JSON, multipart, …)
 // - Declare the accepted content types for body parsing as route options
 // - Offer option to stream the body instead of decoding it?
@@ -7,6 +6,7 @@
 // - Offer more response options (custom headers, …)
 // - Allow more than one request per client (i.e. don’t terminate them after a request). When we do that, we need to make sure we’re responding with "no content" (or fail) if a request handler does not call respond
 // - Support for transfer-encoding: chunked
+// - handle Http_Method.OPTIONS correctlty
 // …
 
 
@@ -42,7 +42,8 @@ Client :: struct {
     pending_data: String_Builder;
     header_end_offsets: [..] int;
     was_cr: bool;
-    eof_reached: bool;
+    received_eof: bool;
+    remove_after_request: bool;
     num_pending_newlines: int;
 }
 
@@ -51,16 +52,24 @@ Request :: struct {
     pool: *Pool;
     id: string;
     header_data: string;
+
     method: Http_Method;
     url: string;
+    http_version: string;
+
+    target: string;
 
     headers: Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
+    host: string;
     content_length: int;
     content_type: string;
     // @ToDo: More fields for commonly referenced headers
 
     pending_body: String_Builder;
 }
+
+HTTP_1_0 :: "HTTP/1.0";
+HTTP_1_1 :: "HTTP/1.1";
 
 Hyperserve_Context :: struct {
     server: *Server;
@@ -69,20 +78,6 @@ Hyperserve_Context :: struct {
 }
 
 #add_context hyperserve: Hyperserve_Context;
-
-push_client :: (client: *Client) #expand {
-    old_client     := context.hyperserve.client;
-    context.hyperserve.client  = client;
-
-    `defer context.hyperserve.client = old_client;
-}
-
-push_request :: (request: *Request) #expand {
-    old_request     := context.hyperserve.request;
-    context.hyperserve.request  = request;
-
-    `defer context.hyperserve.request = old_request;
-}
 
 Http_Method :: enum {
     GET;
@@ -284,7 +279,7 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
     builder: String_Builder;
     defer free_buffers(*builder);
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
-    print_to_builder(*builder, "HTTP/1.1 % %\r\n", cast(int) status_code, get_reason_string(status_code));
+    print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code, get_reason_string(status_code));
     print_to_builder(*builder, "content-length: %\r\n", response.count);
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
     // @Incomplete: custom headers
@@ -319,6 +314,21 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
 #load "routes.jai";
 
 #scope_file
+
+push_client :: (client: *Client) #expand {
+    old_client     := context.hyperserve.client;
+    context.hyperserve.client  = client;
+
+    `defer context.hyperserve.client = old_client;
+}
+
+push_request :: (request: *Request) #expand {
+    old_request     := context.hyperserve.request;
+    context.hyperserve.request  = request;
+
+    `defer context.hyperserve.request = old_request;
+}
+
 
 get_reason_string :: (code: Status_Code) -> string {
     if #complete code == {
@@ -402,7 +412,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
 
             request := cast(*Request) work;
             client := request.client;
-            if client.eof_reached {
+            if client.received_eof || client.remove_after_request {
                 remove_client(server, client);
             } else {
                 // Re-queue the client
@@ -481,7 +491,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
     if is_eof {
         log("Client % closed the connection.", client.name);
-        client.eof_reached = true;
+        client.received_eof = true;
         should_remove = true;
     }
 
@@ -582,12 +592,8 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     push_client(client);
     push_request(request);
 
-    // @ToDo: remove client from the wait group and re-insert after the request got handled!
-    // @ToDo
     success := parse_and_handle_request(server, client, request);
-    if !success client.eof_reached = true;
-
-    log("Finished request");
+    if !success client.remove_after_request = true;
 
     data: u8 = 1;
     result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
@@ -608,7 +614,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
     assert(offset <= request.header_data.count);
     request_line := to_string(request.header_data.data, offset);
     offset += 2; // CRLF
-
+    
     // Parse request line
     log("Request line: %", request_line);
     found, method_string, remainder := split_from_left(request_line, #char " ");
@@ -632,15 +638,35 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
             return false;
     }
 
-    http_version: string;
-    found, request.url, http_version = split_from_left(remainder, #char " ");
-    if http_version != "HTTP/1.1" {
-        log_error("Unsupported HTTP version: %", http_version);
+    found, request.url, request.http_version = split_from_left(remainder, #char " ");
+    if request.http_version != HTTP_1_0 && request.http_version != HTTP_1_1 {
+        log_error("Unsupported HTTP version: %", request.http_version);
+        request.http_version = HTTP_1_1;
         respond("", .HTTP_VERSION_NOT_SUPPORTED);
         return false;
     }
 
-    if !request.url || request.url[0] != #char "/" {
+    if request.http_version == HTTP_1_0 {
+        client.remove_after_request = true;
+    } else {
+        client.remove_after_request = false;
+    }
+
+    if !request.url {
+        log_error("Missing request URL");
+        respond("Missing request URL", .BAD_REQUEST);
+        return false;
+    }
+
+    if request.url[0] == #char "/" {
+        request.target = request.url;
+    } else if begins_with(request.url, "http://") {
+        request.target = get_url_target(request.url, "http://");
+    } else if begins_with(request.url, "https://") {
+        request.target = get_url_target(request.url, "https://");
+    }
+
+    if !request.target {
         log_error("Bad request URL: %", request.url);
         respond("Malformed request URL", .BAD_REQUEST);
         return false;
@@ -668,6 +694,8 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
         log("Header %: %", name, value);
         
         if name == {
+            case "host";
+                request.host = value;
             case "content-length";
                 result, success, remainder := to_integer(value);
                 if !success || remainder {
@@ -678,12 +706,56 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
 
             case "content-type";
                 request.content_type = value;
+            case "connection";
+                to_lower_in_place(value);
+                if value == "close" {
+                    client.remove_after_request = true;
+                } else if request.http_version == HTTP_1_0 && value == "keep-alive" { 
+                    client.remove_after_request = false;
+                } else {
+                    log_error("@Incomplete: Handling of connection tokens is not implemented");
+                    respond("Unsupported connection header value", .NOT_IMPLEMENTED);
+                    return false;
+                } 
         }
+    }
+
+    if table_find_pointer(*request.headers, "transfer-encoding") && table_find_pointer(*request.headers, "content-length") {
+        respond("Only one of transfer-encoding and content-length may be present", .BAD_REQUEST);
+        return false;
+    }
+
+    if request.http_version == {
+        case HTTP_1_0;
+            if request.url != request.target {
+                // 1.0 only supports target, not urls
+                log_error("Bad request URL: %", request.url);
+                respond("Malformed request URL", .BAD_REQUEST);
+                return false;
+            }
+            if table_find_pointer(*request.headers, "transfer-encoding") {
+                respond(tprint("% does not support transfer-encoding", request.http_version), .BAD_REQUEST);
+                return false;
+            }
+        case HTTP_1_1;
+            if !request.host {
+                respond("Missing host header", .BAD_REQUEST);
+                return false;
+            }
+        case;
+            assert(false);
     }
 
     handle_request(request);
 
     return true;
+}
+
+get_url_target :: (url: string, prefix: string) -> string {
+    if url.count < prefix.count + 1 return "";
+    index := find_index_from_left(url, #char "/", prefix.count + 1);
+    if index == -1 return "/";
+    return slice(url, index, url.count - index);
 }
 
 handle_request :: (request: *Request) {
@@ -695,14 +767,14 @@ handle_request :: (request: *Request) {
         return;
     }
 
-    found, path, remainder := split_from_left(request.url, #char "?");
+    found, path, remainder := split_from_left(request.target, #char "?");
     query: string;
     fragment: string; // Ignored
     found, query, fragment = split_from_left(remainder, #char "#");
     {
         success, found, entry, path_parameter_values := find_route(node, path);
         if !success {
-            log_error("Invalid url: % %", request.method, path);
+            log_error("Invalid path: % %", request.method, path);
             respond("Malformed request URL", .BAD_REQUEST);
         }
         if !found {
