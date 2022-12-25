@@ -33,19 +33,19 @@ main :: () {
 
         success &= add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters()) {
             log("Got long path request!");
-            // @ToDo: reply
+            respond("");
         });
         success &= add_route(*server, .GET, "/{prefix}/long/path/but/no/more/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;})) {
             log("Got long path request with prefix: %!", request.url);
-            // @ToDo: reply
+            respond("");
         });
         success &= add_route(*server, .GET, "/{path}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
             log("Got path request: %", request.url);
-            // @ToDo: reply
+            respond("");
         });
         success &= add_route(*server, .GET, "/ping/{path*}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
             log("Got ping request with path: %", request.url);
-            // @ToDo: reply
+            respond("");
         });
 
         {

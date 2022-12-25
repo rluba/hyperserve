@@ -201,6 +201,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
 }
 
 Status_Code :: enum u16 {
+    AUTO                            :: 0;
     // @Incomplete
     OK                              :: 200;
     CREATED                         :: 201;
@@ -244,7 +245,7 @@ update :: (using server: *Server) -> bool{
     return should_quit;
 }
 
-respond :: (response: string, status_code := Status_Code.OK, content_type := "text/plain") {
+respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain") {
     using context.hyperserve;
 
     if request.response_status_code {
@@ -252,12 +253,21 @@ respond :: (response: string, status_code := Status_Code.OK, content_type := "te
         return;
     }
 
-    request.response_status_code = status_code;
+    status_code_to_send := status_code;
+    if status_code == .AUTO {
+        if response {
+           status_code_to_send = .OK;
+        } else {
+           status_code_to_send = .NO_CONTENT;
+        }
+    }
+
+    request.response_status_code = status_code_to_send;
 
     builder: String_Builder;
     defer free_buffers(*builder);
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
-    print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code, get_reason_string(status_code));
+    print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
     print_to_builder(*builder, "content-length: %\r\n", response.count);
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
     // @Incomplete: custom headers
@@ -353,6 +363,7 @@ reset_client_after_request :: (using client: *Client) {
 
 get_reason_string :: (code: Status_Code) -> string {
     if #complete code == {
+        case .AUTO;
         case .OK;                              return "OK";
         case .CREATED;                         return "Created";
         case .ACCEPTED;                        return "Accepted";
