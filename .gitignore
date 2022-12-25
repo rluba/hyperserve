@@ -5,14 +5,11 @@
 # *.[oa]
 # *~
 .build/
-.generated/
-.editorconfig
 /.vs/
 *.swp
 *.obj
 *.pdb
 *.vcxproj.user
-/.vscode
 .DS_Store
 *.dSYM
 hyperserve
