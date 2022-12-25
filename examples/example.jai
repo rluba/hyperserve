@@ -61,9 +61,9 @@ main :: () {
                 arg3 := 1;
             }
             success &= add_route(*server, .GET, "/members/{id}/upload/{upload_id}/{path*}", (request: *Request, parameters: *Request_Parameters(Path_Params, Query_Params)) {
-                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1; 
+                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1;
                 log("Got members request with parameters: %", <<parameters);
-                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 5; 
+                context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 5;
                 // @ToDo: reply
             });
         }
@@ -90,7 +90,5 @@ main :: () {
 #import,file "../module.jai";
 
 #import "Basic";
-#import "Socket";
 
 #import "Command_Line";
-#import "Hash_Table";

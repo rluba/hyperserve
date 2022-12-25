@@ -188,7 +188,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
 
     // @ToDo: Strangely, our signal handlers are not called for SIGQUIT or SIGTERM on macOS.
     // Needs investigation…
-    success = add_signals(*server.wait_group, SIGINT, SIGQUIT, SIGTERM); 
+    success = add_signals(*server.wait_group, SIGINT, SIGQUIT, SIGTERM);
     if !success {
         deinit(server);
         return false;
@@ -274,7 +274,7 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     append(*builder, "\r\n");
     append(*builder, response);
 
-    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false)); 
+    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
 
     // Actually send the response
     // @ToDo: Do this in a blocking way instead of busy-looping!
@@ -384,7 +384,7 @@ get_reason_string :: (code: Status_Code) -> string {
         case .UNSUPPORTED_MEDIA_TYPE;          return "Unsupported Media Type";
         case .UNPROCESSABLE_ENTITY;            return "Unprocessable Entity";
         case .REQUEST_HEADER_FIELDS_TOO_LARGE; return "Request Header Fields Too Large";
-    
+
         case .INTERNAL_SERVER_ERROR;           return "Internal Server Error";
         case .NOT_IMPLEMENTED;                 return "Not Implemented";
         case .HTTP_VERSION_NOT_SUPPORTED;      return "Http Version Not Supported";
@@ -396,13 +396,13 @@ get_reason_string :: (code: Status_Code) -> string {
 handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
     if is_signal {
         if handle == {
-            case SIGINT; 
+            case SIGINT;
                 log("Caught SIGINT. Quitting for now…");
                 server.should_quit = true;
-            case SIGQUIT; 
+            case SIGQUIT;
                 log("Caught SIGQUIT. Quitting…");
                 server.should_quit = true;
-            case SIGTERM; 
+            case SIGTERM;
                 log("Caught SIGTERM. Quitting…");
                 server.should_quit = true;
             case;
@@ -556,7 +556,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
                             end := buffer_size + i - 1;
                             assert(end >= 0);
                             array_add(*client.header_end_offsets, end);
-                        case 2; 
+                        case 2;
                             if server.verbose log("Header complete!");
 
                             pending_body_data := to_string(buffer.data + i + 1, bytes_read - i - 1);
@@ -581,7 +581,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
             // @ToDo: Check agains max header size we want to allow!
         }
     }
-    
+
     if should_remove {
         remove_client(server, client);
     }
@@ -653,7 +653,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
     assert(offset <= request.header_data.count);
     request_line := to_string(request.header_data.data, offset);
     offset += 2; // CRLF
-    
+
     // Parse request line
     if server.verbose log("Request line: %", request_line);
     found, method_string, remainder := split_from_left(request_line, #char " ");
@@ -731,7 +731,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
 
         table_add(*request.headers, name, value);
         if server.verbose log("Header %: %", name, value);
-        
+
         if name == {
             case "host";
                 request.host = value;
@@ -749,13 +749,13 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
                 to_lower_in_place(value);
                 if value == "close" {
                     client.remove_after_request = true;
-                } else if request.http_version == HTTP_1_0 && value == "keep-alive" { 
+                } else if request.http_version == HTTP_1_0 && value == "keep-alive" {
                     client.remove_after_request = false;
                 } else {
                     log_error("@Incomplete: Handling of connection tokens is not implemented");
                     respond("Unsupported connection header value", .NOT_IMPLEMENTED);
                     return false;
-                } 
+                }
         }
     }
 
@@ -1021,45 +1021,100 @@ init_request_thread_group :: (using server: *Server, num_threads: s32) {
 }
 
 parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string, to_parse: string) -> success: bool, error_message: string {
-    success := true;
-
-    info_member, member_offset := get_field(struct_info, member_name);
-    if !info_member {
+    member_info, member_offset := get_field(struct_info, member_name);
+    if !member_info {
         return false, "Unknown parameter";
     }
 
     member_data := data + member_offset;
+    success, error_message := parse_value(member_data, member_info.type, to_parse);
+    return success, error_message;
+}
 
-    if info_member.type.type == {
+parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: bool, error_message: string {
+    if info.type == {
         // @Incomplete
         case .INTEGER;
-            int_info := cast(*Type_Info_Integer) info_member.type;
-            if int_info.signed {
+            info_int := cast(*Type_Info_Integer) info;
+            if info_int.signed {
                 int_value, success, remainder := string_to_int(to_parse, T = s64);
                 if !success || remainder return false, "Value is not a valid signed integer.";
 
-                valid, low, high := Reflection.range_check_and_store(int_value, int_info, member_data);
+                valid, low, high := Reflection.range_check_and_store(int_value, info_int, dest);
                 if !valid return false, tprint("Value must be between % and %", low, high);
             } else {
                 int_value, success, remainder := string_to_int(to_parse, T = u64);
                 if !success || remainder return false, "Value is not a valid unsigned integer.";
 
-                valid, low, high := Reflection.range_check_and_store(int_value, int_info, member_data);
+                valid, low, high := Reflection.range_check_and_store(int_value, info_int, dest);
                 if !valid return false, tprint("Value must be between % and %", low, high);
             }
             return true, "";
         // case .FLOAT;
         // case .BOOL;
         case .STRING;
-            dest := cast(*string) member_data;
-            <<dest = to_parse;
+            string_pointer := cast(*string) dest;
+            <<string_pointer = to_parse;
             return true, "";
-        // case .ENUM;
+        case .ENUM;
+            info_enum := cast(*Type_Info_Enum) info;
+            // @ToDo: Allow other normalization
+            normalized_value := to_upper_copy(to_parse);
+            for name: info_enum.names {
+                if name == normalized_value {
+                    int_value := info_enum.values[it_index];
+                    valid := Reflection.range_check_and_store(int_value, info_enum.internal_type, dest);
+                    assert(valid);
+                    return true, "";
+                }
+            }
+
+            builder: String_Builder;
+            append(*builder, "Invalid value. Allowed: ");
+            for name: info_enum.names {
+                normalized_name := to_lower_copy(name);
+                if it_index append(*builder, ", ");
+                append(*builder, normalized_name);
+            }
+
+            return false, builder_to_string(*builder);
+        case .ARRAY;
+            info_array := cast(*Type_Info_Array) info;
+            assert(!info_array.relative_pointer_size, "@Incomplete: relative array arguments are not yet implemented");
+            element_size := info_array.element_type.runtime_size;
+            element_data: *void;
+            array_count_pointer: *s64;
+            if info_array.array_type == {
+                case .RESIZABLE;
+                    array := cast(*Resizable_Array) dest;
+                    array_count_pointer = *array.count;
+                    Reflection.maybe_grow(array, element_size);
+                    element_data = array.data + array.count * element_size;
+                case .VIEW;
+                    // @Speed: This is stupidly inefficient.
+                    // But without keeping a side-list of dynamic arrays we allocated, we can’t do better
+                    // because we can’t know if it’s a default value or somethign we allocated for a previous value.
+                    array := cast(*Array_View_64) dest;
+                    array_count_pointer = *array.count;
+                    old := <<array;
+                    array.data = alloc((old.count + 1) * element_size);
+                    if old.data {
+                        memcpy(array.data, old.data, old.count * element_size);
+                    }
+                    element_data = array.data + array.count * element_size;
+
+                case; assert(false, "@Incomplete: arguments of array type % are not yet implemented", info_array.array_type);
+            }
+            success, error_message := parse_value(element_data, info_array.element_type, to_parse);
+            if !success	return false, error_message;
+            <<array_count_pointer += 1;
+
+            return true, "";
+
         // case .POINTER;
         // case .PROCEDURE;
         // case .VOID;
         // case .STRUCT;
-        // case .ARRAY;
         // case .OVERLOAD_SET;
         // case .ANY;
         // case .POLYMORPHIC_VARIABLE;
@@ -1067,7 +1122,7 @@ parse_value :: (data: *void, struct_info: *Type_Info_Struct, member_name: string
         // case .CODE;
         // case .VARIANT;
         case;
-            log_error("@Incomplete: Parsing parameters of type % is not yet supported", info_member.type.type);
+            log_error("@Incomplete: Parsing parameters of type % is not yet supported", info.type);
             return false, "Internal parser error";
     }
 }
