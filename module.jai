@@ -268,9 +268,9 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     defer free_buffers(*builder);
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
     print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
-    print_to_builder(*builder, "content-length: %\r\n", response.count);
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
     // @Incomplete: custom headers
+    print_to_builder(*builder, "content-length: %\r\n", response.count);
     append(*builder, "\r\n");
     append(*builder, response);
 
@@ -788,6 +788,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
     handle_request(request);
     if !request.response_status_code {
         log_error("Request handler for request % did not send a response.", request.id);
+        respond("", .INTERNAL_SERVER_ERROR);
         return false;
     }
 
