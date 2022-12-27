@@ -26,6 +26,8 @@ Server :: struct {
     request_thread_group: Thread_Group;
     request_done_read_handle:  s32 = HANDLE_INVALID;
     request_done_write_handle: s32 = HANDLE_INVALID;
+
+    init_thread_callback: #type (thread: *Thread);
 }
 
 Client :: struct {
@@ -245,6 +247,7 @@ update :: (using server: *Server) -> bool{
     return should_quit;
 }
 
+// @ToDo: Make this take a string builder, an array, …
 respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain") {
     using context.hyperserve;
 
@@ -1017,6 +1020,11 @@ init_request_thread_group :: (using server: *Server, num_threads: s32) {
     request_thread_group.name    = "Hyperserve Requests";
     request_thread_group.logging = server.verbose;
     request_thread_group.data = server; // Do we need this?
+    if server.init_thread_callback {
+        for * request_thread_group.worker_info {
+            server.init_thread_callback(*it.thread);
+        }
+    }
 
     start(*request_thread_group);
 }
