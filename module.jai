@@ -272,6 +272,9 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
     print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
+    if request.http_version == HTTP_1_0 && client.remove_after_request == false {
+        append(*builder, "connection: keep-alive\r\n");
+    }
     // @Incomplete: custom headers
     print_to_builder(*builder, "content-length: %\r\n", response.count);
     append(*builder, "\r\n");
