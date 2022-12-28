@@ -1,6 +1,7 @@
 Args :: struct {
     port: u16 = 80;
     verbose: bool;
+    threads: s32 = 10;
 }
 
 main :: () {
@@ -72,7 +73,7 @@ main :: () {
         if args.verbose debug_print_routes(*server);
     }
 
-    success = listen(*server, port = args.port);
+    success = listen(*server, port = args.port, num_threads = args.threads);
     if !success exit(1);
 
     log("listening on port %\n", args.port);
