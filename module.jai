@@ -27,7 +27,11 @@ Server :: struct {
     request_done_read_handle:  s32 = HANDLE_INVALID;
     request_done_write_handle: s32 = HANDLE_INVALID;
 
+    // Set this function if you need to to run custom initialization code
+    // before a worker threads gets started (eg. for setting up custom context fields)
     init_thread_callback: #type (thread: *Thread);
+
+    open_connections: int;
 }
 
 Client :: struct {
@@ -43,6 +47,7 @@ Client :: struct {
 
     // Request data
     request_pool: *Pool;
+    request_start_time: Apollo_Time = APOLLO_TIME_INVALID;
     pending_data: String_Builder;
     header_end_offsets: [..] int;
     was_cr: bool;
@@ -359,6 +364,7 @@ push_request :: (request: *Request) #expand {
 }
 
 reset_client_after_request :: (using client: *Client) {
+    request_start_time = APOLLO_TIME_INVALID;
     reset(*pending_data);
     array_reset(*header_end_offsets);
     was_cr = false;
@@ -416,7 +422,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
                 assert(false);
         }
     } else if handle == server.socket {
-        if server.verbose log("Receiving new connection");
+        if server.verbose log("Receiving new connection (% open connections)", server.open_connections);
         if is_eof {
             log_error("Server socket was closed unexpectedly.");
             server.should_quit = true;
@@ -430,6 +436,8 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
             return;
         }
 
+        server.open_connections += 1;
+
         add_client(server, client_socket, client_addr);
     } else if handle == server.request_done_read_handle {
         // @Speed: get_completed_work is very, very wasteful if you have lots of workers and
@@ -437,8 +445,7 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
         // We should probably use our own thread pool instead, eventually.
         completed_work := get_completed_work(*server.request_thread_group);
         for work: completed_work {
-            if server.verbose log("Got completed work");
-
+            // @Speed, @ToDo: Read completed_work.count bytes ouside the loop instead
             data: u8;
             result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
             if result == -1 {
@@ -451,8 +458,10 @@ handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
             request := cast(*Request) work;
             client := request.client;
             if client.received_eof || client.remove_after_request {
+                if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
                 remove_client(server, client);
             } else {
+                if server.verbose log("Re-queueing client % after request %", client.name, request.id);
                 // Re-queue the client
                 reset_client_after_request(client);
                 add_handles(*server.wait_group, client.socket);
@@ -507,9 +516,11 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
 }
 
 remove_client :: (server: *Server, client: *Client) -> success: bool {
+    if server.verbose log("Removing a client (% open connections)", server.open_connections);
     for * server.clients {
         if it.socket == client.socket {
             deinit(it);
+            server.open_connections -= 1;
             remove it;
             return true;
         }
@@ -536,6 +547,9 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
     {
         push_allocator(pool_allocator_proc, client.request_pool);
+        if client.request_start_time == APOLLO_TIME_INVALID {
+            client.request_start_time = current_time_monotonic();
+        }
 
         buffer := ensure_contiguous_space_and_return_available_range(*client.pending_data, 128);
         success, bytes_read := read_handle(client.socket, buffer);
@@ -611,7 +625,8 @@ hand_off_client_request :: (using server: *Server, client: *Client, header_data:
     request.pool = client.request_pool;
     request.header_data = header_data;
     request.pending_body = pending_body;
-    request.start_time = current_time_monotonic();
+    // @ToDo: Move this to when we get the first byte!!
+    request.start_time = client.request_start_time;
 
     // Further reading is done in the worker thread,
     // so we don't want to wake up the server thread and read whenever the client sends more data
@@ -638,7 +653,8 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     end := current_time_monotonic();
     now := current_time_consensus();
     now_string := calendar_to_iso_string(to_calendar(now));
-    log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(to_microseconds(end - request.start_time) / 1000.0, trailing_width = 2, zero_removal = .NO));
+    request_duration_microseconds := to_microseconds(end - request.start_time);
+    log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
 
     data: u8 = 1;
     result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
