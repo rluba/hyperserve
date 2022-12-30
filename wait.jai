@@ -7,6 +7,20 @@ Wait_Group :: struct {
     } else {
         #assert(false);
     }
+
+    // @Speed: We could use arrays on Linux and index right into it with the poll_fds index
+    fd_handlers:     Table(s32, Fd_Handler);
+    signal_handlers: Table(s32, Signal_Handler);
+}
+
+Fd_Handler :: struct {
+    data: *void;
+    callback: #type (group: *Wait_Group, handle: s32, is_eof: bool, data: *void);
+}
+
+Signal_Handler :: struct {
+    data: *void;
+    callback: #type (group: *Wait_Group, signal: s32, data: *void);
 }
 
 init :: (group: *Wait_Group) -> success: bool {
@@ -33,9 +47,14 @@ deinit :: (group: *Wait_Group) {
         #assert(OS == .MACOS);
         close_and_reset_fd(*group.kevent_queue);
     }
+
+    deinit(*group.fd_handlers);
+    group.fd_handlers.entries.data = null;
+    deinit(*group.signal_handlers);
+    group.signal_handlers.entries.data = null;
 }
 
-add_handles :: (group: *Wait_Group, handles: .. s32) -> success: bool {
+add_handles :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, handle: s32, is_eof: bool, data: *T), handles: .. s32) -> success: bool {
     #if OS == .LINUX {
         array_reserve(*group.poll_fds, *group.poll_fds.count + handles.count);
         for handles {
@@ -60,10 +79,16 @@ add_handles :: (group: *Wait_Group, handles: .. s32) -> success: bool {
         }
     }
 
+    handler: Fd_Handler;
+    handler.data = data;
+    handler.callback = xx callback;
+    for handles {
+        table_add(*group.fd_handlers, it, handler);
+    }
     return true;
 }
 
-add_signals :: (group: *Wait_Group, signals: ..s32) -> success: bool {
+add_signals :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, signal: s32, data: *T), signals: ..s32) -> success: bool {
     #if OS == .LINUX {
         handles := NewArray(signals.count, s32, allocator = temp);
         for signals {
@@ -87,6 +112,13 @@ add_signals :: (group: *Wait_Group, signals: ..s32) -> success: bool {
             log_error("Could not register signal events with the event queue: % %", error_code, error_string);
             return false;
         }
+    }
+
+    handler: Signal_Handler;
+    handler.data = data;
+    handler.callback = xx callback;
+    for signals {
+        table_add(*group.signal_handlers, it, handler);
     }
 
     return true;
@@ -116,13 +148,14 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
         }
     }
 
+    table_remove(*group.fd_handlers, handle);
+
     return true;
 }
 
 // @ToDo: remove_signal
 
-// @Hack: replace is_signal with a separate" on_signal event handler?
-wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bool, handle: s32, is_eof: bool, data: T), timeout_ms := -1) -> success: bool {
+wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
     success := true;
 
     #if OS == .LINUX {
@@ -142,7 +175,7 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bo
 
         for i: 0..group.poll_fds.count-1 {
             it := group.poll_fds[i];
-            handle := it.fd; 
+            handle := it.fd;
 
             if it.revents & POLLNVAL {
                 log_error("Handle % reported invalid value: %", handle, it);
@@ -151,10 +184,12 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bo
 
             signal := table_find_pointer(group.signals_by_handle, handle);
             if signal {
-                on_event(true, <<signal, false, data);
+                handler := table_find_pointer(group.signal_handlers, signal);
+                if handler handler.callback(group, signal, handler.data);
             } else {
                 is_eof := (it.revents & POLLHUP) != 0;
-                on_event(false, handle, is_eof, data);
+                handler := table_find_pointer(group.fd_handlers, handle);
+                if handler handler.callback(group, handle, is_ef, handler.data);
             }
         }
     } else {
@@ -185,13 +220,15 @@ wait_for_events :: (group: *Wait_Group, data: $T, on_event: #type (is_signal: bo
 
         for 0..num_events-1 {
             event := events[it];
-            if event.filter == .READ {
+            if event.filter == .SIGNAL {
+                signal := cast(s32) event.ident;
+                handler := table_find_pointer(*group.signal_handlers, signal);
+                if handler handler.callback(group, signal, handler.data);
+            } else if event.filter == .READ {
                 handle := cast(s32) event.ident;
                 is_eof := (event.flags & .EOF) != 0;
-                on_event(false, handle, is_eof, data);
-            } else if event.filter == .SIGNAL {
-                signal := cast(s32) event.ident;
-                on_event(true, signal, false, data);
+                handler := table_find_pointer(*group.fd_handlers, handle);
+                if handler handler.callback(group, handle, is_eof, handler.data);
             }
         }
     }

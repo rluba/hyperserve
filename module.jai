@@ -6,6 +6,7 @@
 // - Offer more response options (custom headers, …)
 // - Support for transfer-encoding: chunked
 // - handle Http_Method.OPTIONS correctlty
+// - Add timeouts for clients: after connect, after first byte, ...
 // …
 
 
@@ -176,6 +177,12 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
         return false;
     }
 
+    success = add_handles(*server.wait_group, server, handle_connect_event, server.socket);
+    if !success {
+        deinit(server);
+        return false;
+    }
+
     worker_pipes:          [2] s32;
     result = pipe(*worker_pipes);
     if result != 0 {
@@ -187,7 +194,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     server.request_done_read_handle  = worker_pipes[0];
     server.request_done_write_handle = worker_pipes[1];
 
-    success = add_handles(*server.wait_group, server.socket, server.request_done_read_handle);
+    success = add_handles(*server.wait_group, server, handle_request_done_event, server.request_done_read_handle);
     if !success {
         deinit(server);
         return false;
@@ -195,7 +202,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
 
     // @ToDo: Strangely, our signal handlers are not called for SIGQUIT or SIGTERM on macOS.
     // Needs investigation…
-    success = add_signals(*server.wait_group, SIGINT, SIGQUIT, SIGTERM);
+    success = add_signals(*server.wait_group, server, handle_signal_event, SIGINT, SIGQUIT, SIGTERM);
     if !success {
         deinit(server);
         return false;
@@ -242,7 +249,7 @@ code :: (status_code: u16) -> Status_Code {
 }
 
 update :: (using server: *Server) -> bool{
-    success := wait_for_events(*wait_group, server, handle_event);
+    success := wait_for_events(*wait_group);
     if !success {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t wait for events. Exiting…");
@@ -405,85 +412,85 @@ get_reason_string :: (code: Status_Code) -> string {
     return "Unknown Status Code";
 }
 
-handle_event :: (is_signal: bool, handle: s32, is_eof: bool, server: *Server) {
-    if is_signal {
-        if handle == {
-            case SIGINT;
-                log("Caught SIGINT. Quitting for now…");
-                server.should_quit = true;
-            case SIGQUIT;
-                log("Caught SIGQUIT. Quitting…");
-                server.should_quit = true;
-            case SIGTERM;
-                log("Caught SIGTERM. Quitting…");
-                server.should_quit = true;
-            case;
-                log("Caught unexpected signal: %", handle);
-                assert(false);
-        }
-    } else if handle == server.socket {
-        if server.verbose log("Receiving new connection (% open connections)", server.open_connections);
-        if is_eof {
-            log_error("Server socket was closed unexpectedly.");
+handle_signal_event :: (group: *Wait_Group, signal: s32, server: *Server) {
+    if signal == {
+        case SIGINT;
+            log("Caught SIGINT. Quitting for now…");
             server.should_quit = true;
-            return;
-        }
-
-        client_socket, client_addr := accept(server.socket);
-        if client_socket == HANDLE_INVALID {
-            error_code, error_string := System.get_error_value_and_string();
-            log_error("Couldn’t accept on socket: % %", error_code, error_string);
-            return;
-        }
-
-        server.open_connections += 1;
-
-        add_client(server, client_socket, client_addr);
-    } else if handle == server.request_done_read_handle {
-        // @Speed: get_completed_work is very, very wasteful if you have lots of workers and
-        // little completed work, which is the case here under low load.
-        // We should probably use our own thread pool instead, eventually.
-        completed_work := get_completed_work(*server.request_thread_group);
-        for work: completed_work {
-            // @Speed, @ToDo: Read completed_work.count bytes ouside the loop instead
-            data: u8;
-            result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
-            if result == -1 {
-                error_code, error_string := System.get_error_value_and_string();
-                log_error("Could not read from pipe: % %", error_code, error_string);
-            } else {
-                assert(result == 1);
-            }
-
-            request := cast(*Request) work;
-            client := request.client;
-            if client.received_eof || client.remove_after_request {
-                if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
-                remove_client(server, client);
-            } else {
-                if server.verbose log("Re-queueing client % after request %", client.name, request.id);
-                // Re-queue the client
-                reset_client_after_request(client);
-                add_handles(*server.wait_group, client.socket);
-            }
-        }
-    } else {
-        // Clients…
-        client: *Client;
-        for * server.clients {
-            if it.socket == handle {
-                client = it;
-                break;
-            }
-        }
-        if !client {
-            log_error("Could not find client for handle %", handle);
-            return;
-        }
-
-        push_client(client);
-        handle_client_data(server, client, is_eof);
+        case SIGQUIT;
+            log("Caught SIGQUIT. Quitting…");
+            server.should_quit = true;
+        case SIGTERM;
+            log("Caught SIGTERM. Quitting…");
+            server.should_quit = true;
+        case;
+            log("Caught unexpected signal: %", signal);
+            assert(false);
     }
+}
+
+handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
+    assert(handle == server.socket);
+    assert(!is_eof);
+
+    if server.verbose log("Receiving new connection (% open connections)", server.open_connections);
+    if is_eof {
+        log_error("Server socket was closed unexpectedly.");
+        server.should_quit = true;
+        return;
+    }
+
+    client_socket, client_addr := accept(server.socket);
+    if client_socket == HANDLE_INVALID {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Couldn’t accept on socket: % %", error_code, error_string);
+        return;
+    }
+
+    server.open_connections += 1;
+
+    add_client(server, client_socket, client_addr);
+}
+
+handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
+    assert(handle == server.request_done_read_handle);
+    assert(!is_eof);
+
+    // @Speed: get_completed_work is very, very wasteful if you have lots of workers and
+    // little completed work, which is the case here under low load.
+    // We should probably use our own thread pool instead, eventually.
+    completed_work := get_completed_work(*server.request_thread_group);
+    for work: completed_work {
+        // @Speed, @ToDo: Read completed_work.count bytes ouside the loop instead
+        data: u8;
+        result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not read from pipe: % %", error_code, error_string);
+        } else {
+            assert(result == 1);
+        }
+
+        request := cast(*Request) work;
+        client := request.client;
+        if client.received_eof || client.remove_after_request {
+            if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
+            remove_client(server, client);
+        } else {
+            if server.verbose log("Re-queueing client % after request %", client.name, request.id);
+            // Re-queue the client
+            reset_client_after_request(client);
+            add_handles(*server.wait_group, client, handle_client_event, client.socket);
+        }
+    }
+}
+
+handle_client_event :: (group: *Wait_Group, handle: s32, is_eof: bool, client: *Client) {
+    assert(handle == client.socket);
+    server := client.server;
+    // push_server(server); Necessary?
+    push_client(client);
+    handle_client_data(server, client, is_eof);
 }
 
 add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) -> success: bool {
@@ -505,7 +512,7 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
     push_client(client);
 
     if server.verbose log("Hello %!", client.name);
-    success := add_handles(*server.wait_group, client_socket);
+    success := add_handles(*server.wait_group, client, handle_client_event, client_socket);
     if !success {
         log_error("Couldn’t add socket of client % to the server wait group.", client.name);
         deinit(client);
