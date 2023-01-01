@@ -902,14 +902,27 @@ handle_request :: (request: *Request) {
                 if !part continue; // Allow empty query part. We could also complain…
 
                 equals_found, raw_name, raw_value := split_from_left(part, #char "=");
-                if !raw_name || !equals_found {
+                if !raw_name {
                     respond("Malformed query", .BAD_REQUEST);
                     return;
                 }
 
                 success, name := decode_uri_component(raw_name);
+                if !success {
+                    respond(tprint("Malformed encoding in query parameter name: %", raw_name), .BAD_REQUEST);
+                    return;
+                }
+
                 value: string;
+                if equals_found {
                 success, value = decode_uri_component(raw_value);
+                    if !success {
+                        respond(tprint("Malformed encoding in query parameter value of \"%\": %", name, raw_value), .BAD_REQUEST);
+                        return;
+                    }
+                } else {
+                    value = "true"; // Interpret name-only parts ("?flag&name=value") as boolean flags
+                }
 
                 error_message: string;
                 success, error_message = parse_value(query_data, query_info, name, value);
