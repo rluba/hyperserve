@@ -11,7 +11,10 @@ Wait_Group :: struct {
     // @Speed: We could use arrays on Linux and index right into it with the poll_fds index
     fd_handlers:     Table(s32, Fd_Handler);
     signal_handlers: Table(s32, Signal_Handler);
+    user_handlers:   Table(User_Event_Id, User_Handler);
 }
+
+User_Event_Id :: #type,isa u64;
 
 Fd_Handler :: struct {
     data: *void;
@@ -23,8 +26,22 @@ Signal_Handler :: struct {
     callback: #type (group: *Wait_Group, signal: s32, data: *void);
 }
 
+User_Handler :: struct {
+    data: *void;
+    callback: #type (group: *Wait_Group, event_id: User_Event_Id, data: *void);
+}
+
+
 init :: (group: *Wait_Group) -> success: bool {
     #if OS == .MACOS {
+        // @ToDo: This initialization itself is not thread safe
+        // We could do a fancy compare_and_swap loop here like in ensure_synchronization_is_initted
+        // But for now we just ensure that our first wait group is initialized before we do threaded stuff
+        if next_user_event_id == 0 {
+            init(*next_user_event_id_mutex);
+            next_user_event_id = 1;
+        }
+
         group.kevent_queue = kqueue();
         if group.kevent_queue == -1 {
             error_code, error_string := System.get_error_value_and_string();
@@ -52,6 +69,8 @@ deinit :: (group: *Wait_Group) {
     group.fd_handlers.entries.data = null;
     deinit(*group.signal_handlers);
     group.signal_handlers.entries.data = null;
+    deinit(*group.user_handlers);
+    group.user_handlers.entries.data = null;
 }
 
 add_handles :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, handle: s32, is_eof: bool, data: *T), handles: .. s32) -> success: bool {
@@ -124,7 +143,70 @@ add_signals :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Gro
     return true;
 }
 
+add_user_event :: (group: *Wait_Group, data: *$T, callback: #type (group: *Wait_Group, event_id: User_Event_Id, data: *T)) -> success: bool, event_id: User_Event_Id #must {
+    event_id: User_Event_Id;
+
+    #if OS == .LINUX {
+        // @Incomplete: use eventfd
+        assert(false);
+        return false, 0;
+    } else {
+        #assert(OS == .MACOS); // @Incomplete
+        {
+            lock(*next_user_event_id_mutex);
+            defer unlock(*next_user_event_id_mutex);
+            event_id = next_user_event_id;
+            next_user_event_id += 1;
+        }
+
+        events: [1] Kevent64;
+        events[0].ident = event_id;
+        events[0].filter = .USER;
+        events[0].flags = .ADD;
+        events[0].fflags = .FFNOP;
+        result := kevent64(group.kevent_queue, events.data, cast (s32) events.count, null, 0, 0, null);
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not register user event % with the event queue: % %", event_id, error_code, error_string);
+            return false, 0;
+        }
+    }
+
+    handler: User_Handler;
+    handler.data = data;
+    handler.callback = xx callback;
+    table_add(*group.user_handlers, event_id, handler);
+
+    return true, event_id;
+}
+
+trigger_user_event :: (group: *Wait_Group, event_id: User_Event_Id) -> success: bool {
+    #if OS == .LINUX {
+        // @Incomplete: use eventfd
+        assert(false);
+        return false;
+    } else {
+        #assert(OS == .MACOS); // @Incomplete
+
+        events: [1] Kevent64;
+        events[0].ident = event_id;
+        events[0].filter = .USER;
+        events[0].flags = .ENABLE;
+        events[0].fflags = Kevent_Fflags.FFCOPY | .TRIGGER | 0x01;
+        result := kevent64(group.kevent_queue, events.data, cast (s32) events.count, null, 0, 0, null);
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not trigger user event % with the event queue: % %", event_id, error_code, error_string);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
+    table_remove(*group.fd_handlers, handle);
+
     #if OS == .LINUX {
         for handles {
             if it.fd == handle {
@@ -143,18 +225,41 @@ remove_handle :: (group: *Wait_Group, handle: s32) -> success: bool {
         result := kevent64(group.kevent_queue, events.data, cast (s32) events.count, null, 0, 0, null);
         if result == -1 {
             error_code, error_string := System.get_error_value_and_string();
-            log_error("Could not remove handle % with the event queue: % %", handle, error_code, error_string);
+            log_error("Could not remove handle % from the event queue: % %", handle, error_code, error_string);
             return false;
         }
     }
-
-    table_remove(*group.fd_handlers, handle);
 
     return true;
 }
 
 // @ToDo: remove_signal
 
+remove_user_event :: (group: *Wait_Group, event_id: User_Event_Id) -> success: bool {
+    table_remove(*group.user_handlers, event_id);
+
+    #if OS == .LINUX {
+        // @Incomplete: use eventfd
+        assert(false);
+        return false;
+    } else {
+        events: [1] Kevent64;
+        events[0].ident = event_id;
+        events[0].filter = .USER;
+        events[0].flags = .DELETE;
+
+        result := kevent64(group.kevent_queue, events.data, cast (s32) events.count, null, 0, 0, null);
+        if result == -1 {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not remove user event % from the event queue: % %", event_id, error_code, error_string);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// @Hack: replace is_signal with a separate" on_signal event handler?
 wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
     success := true;
 
@@ -187,6 +292,7 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
                 handler := table_find_pointer(group.signal_handlers, signal);
                 if handler handler.callback(group, signal, handler.data);
             } else {
+                // @Incomplete: user event handlers!
                 is_eof := (it.revents & POLLHUP) != 0;
                 handler := table_find_pointer(group.fd_handlers, handle);
                 if handler handler.callback(group, handle, is_ef, handler.data);
@@ -229,6 +335,10 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
                 is_eof := (event.flags & .EOF) != 0;
                 handler := table_find_pointer(*group.fd_handlers, handle);
                 if handler handler.callback(group, handle, is_eof, handler.data);
+            } else if event.filter == .USER {
+                event_id := cast(User_Event_Id) event.ident;
+                handler := table_find_pointer(*group.user_handlers, event_id);
+                if handler handler.callback(group, event_id, handler.data);
             }
         }
     }
@@ -248,6 +358,11 @@ close_and_reset_fd :: (fd: *s32, loc := #caller_location) {
 }
 
 #scope_file
+
+#if OS == .MACOS {
+    next_user_event_id_mutex: Mutex;
+    next_user_event_id: User_Event_Id;
+}
 
 #if OS == .LINUX {
     create_signal_handle :: (signal: s32) -> handle: s32, success: bool {

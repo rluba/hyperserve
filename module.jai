@@ -352,6 +352,7 @@ debug_print_routes :: (server: *Server) {
 
 #load "wait.jai";
 #load "routes.jai";
+#load "yield.jai";
 
 #scope_file
 
