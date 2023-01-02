@@ -33,7 +33,14 @@ User_Handler :: struct {
 
 
 init :: (group: *Wait_Group) -> success: bool {
-    #if OS == .MACOS {
+    remember_allocators(*group.fd_handlers);
+    remember_allocators(*group.signal_handlers);
+    remember_allocators(*group.user_handlers);
+
+    #if OS == .LINUX {
+        remember_allocators(*group.poll_fds);
+        remember_allocators(*group.signals_by_handle);
+    } else #if OS == .MACOS {
         // @ToDo: This initialization itself is not thread safe
         // We could do a fancy compare_and_swap loop here like in ensure_synchronization_is_initted
         // But for now we just ensure that our first wait group is initialized before we do threaded stuff
@@ -310,7 +317,7 @@ wait_for_events :: (group: *Wait_Group, timeout_ms := -1) -> success: bool {
         }
 
         // @ToDo: Max events?
-        events: [2] Kevent64;
+        events: [64] Kevent64;
         num_events := kevent64(group.kevent_queue, null, 0, events.data, events.count, 0, timeout_spec_pointer);
         if num_events == -1 {
             error_code := System.get_error_value();
