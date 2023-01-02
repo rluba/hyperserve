@@ -8,6 +8,8 @@ Request_Parameters :: struct (Path: Type = void, Query: Type = void, Payload: Ty
     // payload_extra: Table(string, string);
 }
 
+Untyped_Request_Handler :: #type (request: *Request, parameters: *void);
+
 Route :: struct {
     path:            string;
     parameters_info: *Type_Info_Struct;
@@ -15,7 +17,7 @@ Route :: struct {
     // query_info:      *Type_Info;
     // payload_info:    *Type_Info;
 
-    handler:         #type (request: *Request, parameters: *void);
+    handler:         Untyped_Request_Handler;
 }
 
 Route_Segment :: struct {
@@ -88,14 +90,14 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
 
     if parameters.count == parameter_index {
         // Fully literal
-        
+
         length := 0;
         for segments {
             assert(it.literal != "");
             length += it.literal.count + 1;
         }
         if length == 0 then length = 1;
-        literal := slice(path, path.count - length, length); 
+        literal := slice(path, path.count - length, length);
 
         // builder: String_Builder;
         // for segments {
@@ -172,7 +174,7 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
 
     parameters: [..] string;
     segments: [..] Route_Segment;
-    
+
     found: bool;
     part: string;
     path_remainder := slice(path, 1, path.count - 1);

@@ -33,6 +33,8 @@ Server :: struct {
     init_thread_callback: #type (thread: *Thread);
 
     open_connections: int;
+
+    requests_that_have_yielded: [..] *Request; // Just for debugging, for now
 }
 
 Client :: struct {
@@ -43,6 +45,7 @@ Client :: struct {
 
     next_request_index: int;
 
+    waiting_for_data: bool;
     received_eof: bool;
     remove_after_request: bool;
 
@@ -56,6 +59,7 @@ Client :: struct {
 }
 
 Request :: struct {
+    using #as yieldable: Yieldable;
     client: *Client;
     pool: *Pool;
     id: string;
@@ -75,8 +79,15 @@ Request :: struct {
 
     pending_body: String_Builder;
 
+
+    // Internal framework fields for state tracking
     start_time: Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
+    handler: Untyped_Request_Handler;
+    parsed_parameters: *void;
+
+    // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
+    handler_data: *void;
 }
 
 HTTP_1_0 :: "HTTP/1.0";
@@ -453,6 +464,21 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
     add_client(server, client_socket, client_addr);
 }
 
+on_request_yield_reason_complete :: (reason: *Yield_Reason) {
+    request := cast(*Request) reason.target;
+    server := request.client.server;
+    array_unordered_remove_by_value(*request.yielded_on, reason);
+
+    if !request.yielded_on {
+        // Last yield reason is done! Re-queue this request for processing on a request thread
+        size := server.requests_that_have_yielded.count;
+        array_unordered_remove_by_value(*server.requests_that_have_yielded, request);
+        assert(server.requests_that_have_yielded.count == size - 1);
+
+        add_work(*server.request_thread_group, request);
+    }
+}
+
 handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
     assert(handle == server.request_done_read_handle);
     assert(!is_eof);
@@ -474,14 +500,34 @@ handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, ser
 
         request := cast(*Request) work;
         client := request.client;
-        if client.received_eof || client.remove_after_request {
-            if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
-            remove_client(server, client);
+        assert(!client.waiting_for_data);
+
+        if request.yielded_on {
+            array_add(*server.requests_that_have_yielded, request);
+
+            // Request yielded and is not done yet
+            push_allocator(pool_allocator_proc, request.pool);
+
+            // @ToDO: We could do this outside the pool...
+            reasons_copy := array_copy(request.yielded_on);
+            for reason: reasons_copy {
+                reason.target = request;
+                // @ToDo @Speed: We could schedule all the request reasons on a separate work group
+                // to avoid overloading the main server’s work group.
+                // (We might start dropping new connect requests if the main thread is too busy.)
+                reason.add_to_wait_group(reason, *server.wait_group, on_request_yield_reason_complete);
+            }
         } else {
-            if server.verbose log("Re-queueing client % after request %", client.name, request.id);
-            // Re-queue the client
-            reset_client_after_request(client);
-            add_handles(*server.wait_group, client, handle_client_event, client.socket);
+            // Request is complete
+            if client.received_eof || client.remove_after_request {
+                if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
+                remove_client(server, client);
+            } else {
+                if server.verbose log("Re-queueing client % after request %", client.name, request.id);
+                // Re-queue the client
+                reset_client_after_request(client);
+                add_client_to_wait_group(server, client);
+            }
         }
     }
 }
@@ -494,14 +540,14 @@ handle_client_event :: (group: *Wait_Group, handle: s32, is_eof: bool, client: *
     handle_client_data(server, client, is_eof);
 }
 
-add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) -> success: bool {
+add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) {
     // ToDo: Create an allocator for this client (and also use it for the name)
     client := find_and_occupy_empty_slot(*server.clients);
     client.server = server;
     client.name = to_string(client_addr);
     client.socket = client_socket;
     client.address = client_addr;
-    client.request_pool = New(Pool);
+    client.request_pool = New(Pool); // @Speed: We could keep a pool of pools so that we don’t allocate new memory for every client.
     set_allocators(client.request_pool);
 
     {
@@ -513,23 +559,33 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) ->
     push_client(client);
 
     if server.verbose log("Hello %!", client.name);
-    success := add_handles(*server.wait_group, client, handle_client_event, client_socket);
+
+    add_client_to_wait_group(server, client);
+}
+
+add_client_to_wait_group :: (server: *Server, client: *Client) {
+    success := add_handles(*server.wait_group, client, handle_client_event, client.socket);
     if !success {
         log_error("Couldn’t add socket of client % to the server wait group.", client.name);
-        deinit(client);
-        return false;
+        remove_client(server, client);
+        return;
     }
 
-    return true;
+    client.waiting_for_data = true;
 }
 
 remove_client :: (server: *Server, client: *Client) -> success: bool {
     if server.verbose log("Removing a client (% open connections)", server.open_connections);
     for * server.clients {
         if it.socket == client.socket {
+            if client.waiting_for_data {
+                remove_handle(*server.wait_group, client.socket);
+            }
+
             deinit(it);
             server.open_connections -= 1;
             remove it;
+
             return true;
         }
     }
@@ -638,6 +694,7 @@ hand_off_client_request :: (using server: *Server, client: *Client, header_data:
 
     // Further reading is done in the worker thread,
     // so we don't want to wake up the server thread and read whenever the client sends more data
+    client.waiting_for_data = false;
     remove_handle(*wait_group, client.socket);
 
     add_work(*request_thread_group, request);
@@ -655,14 +712,25 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     push_client(client);
     push_request(request);
 
-    success := parse_and_handle_request(server, client, request);
-    if !success client.remove_after_request = true;
+    if !request.handler {
+        success := parse_request_and_find_route(server, client, request);
+        if !success client.remove_after_request = true;
+    }
 
-    end := current_time_monotonic();
-    now := current_time_consensus();
-    now_string := calendar_to_iso_string(to_calendar(now));
-    request_duration_microseconds := to_microseconds(end - request.start_time);
-    log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
+    if !request.response_status_code {
+        assert(request.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
+        request.handler(request, request.parsed_parameters);
+    }
+
+    if !request.yielded_on {
+        assert(request.response_status_code != 0);
+
+        end := current_time_monotonic();
+        now := current_time_consensus();
+        now_string := calendar_to_iso_string(to_calendar(now));
+        request_duration_microseconds := to_microseconds(end - request.start_time);
+        log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
+    }
 
     data: u8 = 1;
     result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
@@ -678,7 +746,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     return .CONTINUE;
 }
 
-parse_and_handle_request :: (server: *Server, client: *Client, request: *Request) -> success: bool {
+parse_request_and_find_route :: (server: *Server, client: *Client, request: *Request) -> success: bool {
     offset := client.header_end_offsets[0];
     assert(offset <= request.header_data.count);
     request_line := to_string(request.header_data.data, offset);
@@ -815,12 +883,7 @@ parse_and_handle_request :: (server: *Server, client: *Client, request: *Request
             assert(false);
     }
 
-    handle_request(request);
-    if !request.response_status_code {
-        log_error("Request handler for request % did not send a response.", request.id);
-        respond("", .INTERNAL_SERVER_ERROR);
-        return false;
-    }
+    find_route_and_parse_parameters(request);
 
     return true;
 }
@@ -832,7 +895,7 @@ get_url_target :: (url: string, prefix: string) -> string {
     return slice(url, index, url.count - index);
 }
 
-handle_request :: (request: *Request) {
+find_route_and_parse_parameters :: (request: *Request) {
     verbose := context.hyperserve.server.verbose;
     node := table_find_pointer(*context.hyperserve.server.routes, request.method);
     if !node {
@@ -915,7 +978,7 @@ handle_request :: (request: *Request) {
 
                 value: string;
                 if equals_found {
-                success, value = decode_uri_component(raw_value);
+                    success, value = decode_uri_component(raw_value);
                     if !success {
                         respond(tprint("Malformed encoding in query parameter value of \"%\": %", name, raw_value), .BAD_REQUEST);
                         return;
@@ -940,7 +1003,8 @@ handle_request :: (request: *Request) {
             }
         }
 
-        entry.route.handler(request, params);
+        request.handler = entry.route.handler;
+        request.parsed_parameters = params;
     }
 }
 
