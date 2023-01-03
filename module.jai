@@ -9,7 +9,7 @@
 // - Add timeouts for clients: after connect, after first byte, ...
 // …
 
-#module_parameters () (Request_Type: Type);
+#module_parameters () (Request_Type: Type = Base_Request);
 // @ToDO: Make sure Request_Type contains a Base_Request
 
 HANDLE_INVALID :: -1;
@@ -95,6 +95,8 @@ Base_Request :: struct {
     // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
     handler_data: *void;
 }
+
+Request :: Request_Type;
 
 Request_Phase :: enum {
     PARSING;
@@ -1276,8 +1278,6 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
 }
 
 #scope_module
-
-Request :: Request_Type;
 
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
     bytes_read := read(handle, buffer.data, cast(u64) buffer.count);
