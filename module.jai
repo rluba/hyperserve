@@ -9,11 +9,15 @@
 // - Add timeouts for clients: after connect, after first byte, ...
 // …
 
+#module_parameters () (Request_Type: Type);
+// @ToDO: Make sure Request_Type contains a Base_Request
 
 HANDLE_INVALID :: -1;
 
 Server :: struct {
     verbose         := false;
+    auth: #type (request: *Request);
+
     socket:         s32 = HANDLE_INVALID;
     sigint_handle:  s32 = HANDLE_INVALID;
     sigquit_handle: s32 = HANDLE_INVALID;
@@ -58,12 +62,14 @@ Client :: struct {
     num_pending_newlines: int;
 }
 
-Request :: struct {
-    using #as yieldable: Yieldable;
+Base_Request :: struct {
     client: *Client;
     pool: *Pool;
     id: string;
     header_data: string;
+
+    phase: Request_Phase;
+    yielded_on: [..] *Yield_Reason;
 
     method: Http_Method;
     url: string;
@@ -73,12 +79,12 @@ Request :: struct {
 
     headers: Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
     host: string;
+    authorization: string;
     content_length: int;
     content_type: string;
     // @ToDo: More fields for commonly referenced headers
 
     pending_body: String_Builder;
-
 
     // Internal framework fields for state tracking
     start_time: Apollo_Time = APOLLO_TIME_INVALID;
@@ -88,6 +94,12 @@ Request :: struct {
 
     // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
     handler_data: *void;
+}
+
+Request_Phase :: enum {
+    PARSING;
+    AUTH;
+    HANDLING;
 }
 
 HTTP_1_0 :: "HTTP/1.0";
@@ -365,9 +377,6 @@ debug_print_routes :: (server: *Server) {
 #load "routes.jai";
 #load "yield.jai";
 
-#scope_file
-
-
 push_client :: (client: *Client) #expand {
     old_client     := context.hyperserve.client;
     context.hyperserve.client  = client;
@@ -381,6 +390,10 @@ push_request :: (request: *Request) #expand {
 
     `defer context.hyperserve.request = old_request;
 }
+
+#scope_file
+
+
 
 reset_client_after_request :: (using client: *Client) {
     request_start_time = APOLLO_TIME_INVALID;
@@ -464,13 +477,18 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
     add_client(server, client_socket, client_addr);
 }
 
-on_request_yield_reason_complete :: (reason: *Yield_Reason) {
-    request := cast(*Request) reason.target;
+on_request_yield_reason_complete :: (reason: *Yield_Reason, data: *void) {
+    request := cast(*Request) data;
     server := request.client.server;
     array_unordered_remove_by_value(*request.yielded_on, reason);
 
     if !request.yielded_on {
-        // Last yield reason is done! Re-queue this request for processing on a request thread
+        // Last yield reason is done! Let’s make progress on this request
+        if request.phase == .AUTH && !request.response_status_code {
+            request.phase = .HANDLING;
+        }
+
+        // Re-queue this request for processing on a request thread
         size := server.requests_that_have_yielded.count;
         array_unordered_remove_by_value(*server.requests_that_have_yielded, request);
         assert(server.requests_that_have_yielded.count == size - 1);
@@ -511,11 +529,10 @@ handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, ser
             // @ToDO: We could do this outside the pool...
             reasons_copy := array_copy(request.yielded_on);
             for reason: reasons_copy {
-                reason.target = request;
                 // @ToDo @Speed: We could schedule all the request reasons on a separate work group
                 // to avoid overloading the main server’s work group.
                 // (We might start dropping new connect requests if the main thread is too busy.)
-                reason.add_to_wait_group(reason, *server.wait_group, on_request_yield_reason_complete);
+                begin(reason, *server.wait_group, request, on_request_yield_reason_complete);
             }
         } else {
             // Request is complete
@@ -712,13 +729,29 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     push_client(client);
     push_request(request);
 
-    if !request.handler {
+    if request.phase == .PARSING {
         success := parse_request_and_find_route(server, client, request);
         if !success client.remove_after_request = true;
+
+        assert(!request.yielded_on);
+        if !request.response_status_code {
+            assert(request.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
+            request.phase = .AUTH;
+        }
     }
 
-    if !request.response_status_code {
-        assert(request.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
+    if request.phase == .AUTH && !request.response_status_code {
+        if server.auth {
+            server.auth(request);
+            if !request.yielded_on && !request.response_status_code {
+                request.phase = .HANDLING;
+            }
+        } else {
+            request.phase = .HANDLING;
+        }
+    }
+
+    if request.phase == .HANDLING {
         request.handler(request, request.parsed_parameters);
     }
 
@@ -833,6 +866,8 @@ parse_request_and_find_route :: (server: *Server, client: *Client, request: *Req
         if name == {
             case "host";
                 request.host = value;
+            case "authorization";
+                request.authorization = value;
             case "content-length";
                 result, success, remainder := to_integer(value);
                 if !success || remainder {
@@ -1242,6 +1277,8 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
 
 #scope_module
 
+Request :: Request_Type;
+
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
     bytes_read := read(handle, buffer.data, cast(u64) buffer.count);
     if bytes_read < 0 {
@@ -1270,7 +1307,6 @@ repeat_if_interrupted :: (call: Code) -> s64 #expand {
         return result;
     }
 }
-
 
 #import "Basic";
 #import "Bucket_Array";
