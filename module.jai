@@ -758,6 +758,9 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     if !request.yielded_on {
+        if request.response_status_code == 0 {
+            respond(status_code = .INTERNAL_SERVER_ERROR);
+        }
         assert(request.response_status_code != 0);
 
         end := current_time_monotonic();
