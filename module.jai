@@ -89,6 +89,8 @@ Base_Request :: struct {
     // Internal framework fields for state tracking
     start_time: Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
+
+    auth_mode: Auth_Mode;
     handler: Untyped_Request_Handler;
     parsed_parameters: *void;
 
@@ -743,7 +745,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     if request.phase == .AUTH && !request.response_status_code {
-        if server.auth {
+        if server.auth  && request.auth_mode != .OFF {
             server.auth(request);
             if !request.yielded_on && !request.response_status_code {
                 request.phase = .HANDLING;
@@ -1043,6 +1045,7 @@ find_route_and_parse_parameters :: (request: *Request) {
             }
         }
 
+        request.auth_mode = entry.route.auth_mode;
         request.handler = entry.route.handler;
         request.parsed_parameters = params;
     }

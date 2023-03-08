@@ -10,7 +10,13 @@ Request_Parameters :: struct (Path: Type = void, Query: Type = void, Payload: Ty
 
 Untyped_Request_Handler :: #type (request: *Request, parameters: *void);
 
+Auth_Mode :: enum {
+    DEFAULT;
+    OFF;
+}
+
 Route :: struct {
+    auth_mode:       Auth_Mode;
     path:            string;
     parameters_info: *Type_Info_Struct;
     // path_info:       *Type_Info;
@@ -41,7 +47,7 @@ Routing_Node :: struct {
     }
 }
 
-add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters)) -> bool {
+add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .DEFAULT) -> bool {
     success, parameters, segments := analyze_path(path);
     if !success then return false;
 
@@ -73,14 +79,15 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
     }
 
     node := find_or_add(*server.routes, method);
-    return add_route(node, path, handler, parameters, segments, 0);
+    return add_route(node, path, handler, auth, parameters, segments, 0);
 }
 
-add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), parameters: [] string, segments: [] Route_Segment, parameter_index: int) -> bool {
+add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth_mode: Auth_Mode, parameters: [] string, segments: [] Route_Segment, parameter_index: int) -> bool {
     // @ToDo: This is silly! Create this once and pass it through!
     entry: Routing_Node.Entry;
     entry.parameters = parameters;
     entry.segments = segments;
+    entry.route.auth_mode = auth_mode;
     entry.route.path = path;
     entry.route.parameters_info = type_info(T);
     // entry.route.path_info = type_info(T.path);
@@ -126,7 +133,7 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
             if !(<<sub_node_pointer) {
                 <<sub_node_pointer = New(Routing_Node);
             }
-            return add_route(<<sub_node_pointer, path, handler, parameters, remaining, parameter_index);
+            return add_route(<<sub_node_pointer, path, handler, auth_mode, parameters, remaining, parameter_index);
         } else if current.wildcard {
             // Wildcard route
             if node.wildcard.route.path {
@@ -153,7 +160,7 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
                 }
                 node.parameter_index = parameter_index;
 
-                return add_route(node.parameter, path, handler, parameters, remaining, parameter_index + 1);
+                return add_route(node.parameter, path, handler, auth_mode, parameters, remaining, parameter_index + 1);
             } else {
                 if node.edge.route.path {
                     log_error("Route \"%\" conflicts with route \"%\"", path, node.edge.route.path);
