@@ -229,7 +229,7 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
 
             array_add(*parameters, parameter);
         } else {
-            segment.literal = to_lower_copy(part);
+            segment.literal = to_lower_copy(part, allocator = context.allocator);
         }
         array_add(*segments, segment);
     }
