@@ -9,7 +9,7 @@
 // - Add timeouts for clients: after connect, after first byte, ...
 // …
 
-#module_parameters () (Request_Type: Type = Base_Request);
+#module_parameters () (Request_Type: Type = Base_Request, USE_CLUSTER := false);
 // @ToDO: Make sure Request_Type contains a Base_Request
 
 HANDLE_INVALID :: -1;
@@ -133,6 +133,13 @@ shutdown :: (using server: *Server, timeout_milliseconds: s32 = 60 * 1000) {
     }
 }
 
+init :: (using server: *Server) -> bool {
+    #if USE_CLUSTER {
+        if !cluster_init() return false;
+    }
+    return true;
+}
+
 deinit :: (using server: *Server) {
     shutdown(server, 0);
 
@@ -151,14 +158,53 @@ deinit :: (using server: *Server) {
 }
 
 listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
-    // @ToDo: IPv6
-    // @ToDo: optionally restrict interface
-    server.socket = socket(AF_INET, .STREAM, 0);
-    if server.socket == HANDLE_INVALID {
-        error_code := get_last_socket_error();
-        error_string := System.get_error_string(error_code);
-        log_error("Couldn’t create socket: % %", error_code, error_string);
-        return false;
+    result: s32;
+    #if USE_CLUSTER {
+        server.socket = cluster_listen(INADDR_ANY, port);
+        if server.socket == HANDLE_INVALID {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t create socket: % %", error_code, error_string);
+            return false;
+        }
+    } else {
+        // @ToDo: IPv6
+        // @ToDo: optionally restrict interface
+        server.socket = socket(AF_INET, .STREAM, 0);
+        if server.socket == HANDLE_INVALID {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t create socket: % %", error_code, error_string);
+            return false;
+        }
+
+        reuse_addr: s32 = 1;
+        result = setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t set socket options: % %", error_code, error_string);
+            deinit(server);
+            return false;
+        }
+
+        result = bind(server.socket, INADDR_ANY, port);
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t bind socket: % %", error_code, error_string);
+            deinit(server);
+            return false;
+        }
+
+        result = listen(server.socket, SOMAXCONN);
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t listen on socket: % %", error_code, error_string);
+            deinit(server);
+            return false;
+        }
     }
 
     success := set_blocking(server.socket, false);
@@ -166,34 +212,6 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
         error_code := get_last_socket_error();
         error_string := System.get_error_string(error_code);
         log_error("Couldn’t set socket to non-blocking: % %", error_code, error_string);
-        deinit(server);
-        return false;
-    }
-
-    reuse_addr: s32 = 1;
-    result := setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
-    if result == -1 {
-        error_code := get_last_socket_error();
-        error_string := System.get_error_string(error_code);
-        log_error("Couldn’t set socket options: % %", error_code, error_string);
-        deinit(server);
-        return false;
-    }
-
-    result = bind(server.socket, INADDR_ANY, port);
-    if result == -1 {
-        error_code := get_last_socket_error();
-        error_string := System.get_error_string(error_code);
-        log_error("Couldn’t bind socket: % %", error_code, error_string);
-        deinit(server);
-        return false;
-    }
-
-    result = listen(server.socket, SOMAXCONN);
-    if result == -1 {
-        error_code := get_last_socket_error();
-        error_string := System.get_error_string(error_code);
-        log_error("Couldn’t listen on socket: % %", error_code, error_string);
         deinit(server);
         return false;
     }
@@ -469,7 +487,11 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
         return;
     }
 
-    client_socket, client_addr := accept(server.socket);
+    #if USE_CLUSTER {
+        client_socket, client_addr := cluster_accept(server.socket);
+    } else {
+        client_socket, client_addr := accept(server.socket);
+    }
     if client_socket == HANDLE_INVALID {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t accept on socket: % %", error_code, error_string);
@@ -1323,6 +1345,10 @@ repeat_if_interrupted :: (call: Code) -> s64 #expand {
 #import "String";
 System     :: #import "System";
 Reflection :: #import "Reflection";
+
+#if USE_CLUSTER {
+    #import "cluster";
+}
 
 #if OS != .WINDOWS {
     #import "POSIX";
