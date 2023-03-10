@@ -19,9 +19,6 @@ Server :: struct {
     auth: #type (request: *Request);
 
     socket:         s32 = HANDLE_INVALID;
-    sigint_handle:  s32 = HANDLE_INVALID;
-    sigquit_handle: s32 = HANDLE_INVALID;
-    sigterm_handle: s32 = HANDLE_INVALID;
     wait_group:     Wait_Group;
 
     should_quit:    bool;
@@ -150,9 +147,6 @@ deinit :: (using server: *Server) {
     deinit(*wait_group);
 
     close_and_reset(*socket);
-    close_and_reset(*sigint_handle);
-    close_and_reset(*sigquit_handle);
-    close_and_reset(*sigterm_handle);
     close_and_reset(*request_done_read_handle);
     close_and_reset(*request_done_write_handle);
 }
@@ -395,7 +389,6 @@ debug_print_routes :: (server: *Server) {
 }
 
 
-#load "wait.jai";
 #load "routes.jai";
 #load "yield.jai";
 
@@ -1346,10 +1339,12 @@ repeat_if_interrupted :: (call: Code) -> s64 #expand {
 System     :: #import "System";
 Reflection :: #import "Reflection";
 
-#if USE_CLUSTER {
-    #import "cluster";
-}
-
 #if OS != .WINDOWS {
     #import "POSIX";
+}
+
+#import "wait_group"; // https://github.com/rluba/wait_group
+
+#if USE_CLUSTER {
+    #import "cluster"; // https://github.com/rluba/cluster
 }
