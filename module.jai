@@ -239,9 +239,17 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
         return false;
     }
 
-    // @ToDo: Strangely, our signal handlers are not called for SIGQUIT or SIGTERM on macOS.
-    // Needs investigation…
-    success = add_signals(*server.wait_group, server, handle_signal_event, SIGINT, SIGQUIT, SIGTERM);
+    // Instead of ignoring, we have to define a no-op signal handler because SIG_IGN is inherited by child processes, but signal handlers are not.
+    // WTF, fork(), really?!?!
+    ignore_signal :: (signal: s32) #c_call {}
+    sa: sigaction_t;
+    sa.sa_handler = ignore_signal;
+    sigemptyset(*sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK | SA_RESTART;
+    sigaction(SIGINT, *sa, null); // Stop
+    sigaction(SIGTERM, *sa, null); // Stop
+
+    success = add_signals(*server.wait_group, server, handle_signal_event, SIGINT, SIGTERM);
     if !success {
         deinit(server);
         return false;
@@ -454,8 +462,9 @@ get_reason_string :: (code: Status_Code) -> string {
 
 handle_signal_event :: (group: *Wait_Group, signal: s32, server: *Server) {
     if signal == {
+        // @ToDo @Incomplete: Finish all current requests before exiting.
         case SIGINT;
-            log("Caught SIGINT. Quitting for now…");
+            log("Caught SIGINT. Quitting…");
             server.should_quit = true;
         case SIGQUIT;
             log("Caught SIGQUIT. Quitting…");
