@@ -73,19 +73,17 @@ main :: () {
         if args.verbose debug_print_routes(*server);
     }
 
-    success = listen(*server, port = args.port, num_threads = args.threads);
+    success = start(*server, port = args.port, num_threads = args.threads);
     if !success exit(1);
+
+    defer deinit(*server);
 
     log("listening on port %\n", args.port);
 
-    while !server.should_quit {
+    while server.state != .STOPPED {
         update(*server);
         reset_temporary_storage();
     }
-
-    shutdown(*server);
-
-    deinit(*server);
 }
 
 #import,file "../module.jai";

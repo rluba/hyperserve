@@ -21,8 +21,12 @@ Server :: struct {
     socket:                     s32 = HANDLE_INVALID;
     wait_group:                 Wait_Group;
 
-    should_shut_down:           bool;
-    should_quit:                bool;
+    state: enum {
+        DEFAULT;
+        STARTED;
+        STOPPING;
+        STOPPED;
+    };
     clients:                    Bucket_Array(Client, 64);
 
     routes:                     Table(Http_Method, Routing_Node);
@@ -125,21 +129,11 @@ Http_Method :: enum {
     OPTIONS;
 }
 
-shutdown :: (using server: *Server, timeout_milliseconds: s32 = 60 * 1000) {
-    if request_thread_group.initted && !request_thread_group.should_exit {
-        shutdown(*request_thread_group, timeout_milliseconds);
-    }
-}
-
-init :: (using server: *Server) -> bool {
-    #if USE_CLUSTER {
-        if !cluster_init() return false;
-    }
-    return true;
-}
-
 deinit :: (using server: *Server) {
-    shutdown(server, 0);
+    if request_thread_group.initted && !request_thread_group.should_exit {
+        shutdown(*request_thread_group);
+    }
+    deinit(*request_thread_group);
 
     for * clients {
         remove_client(server, it);
@@ -152,7 +146,11 @@ deinit :: (using server: *Server) {
     close_and_reset(*request_done_write_handle);
 }
 
-listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
+start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
+    #if USE_CLUSTER {
+        if !cluster_init() return false;
+    }
+
     result: s32;
     #if USE_CLUSTER {
         server.socket = cluster_listen(INADDR_ANY, port);
@@ -247,7 +245,7 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     sa.sa_handler = ignore_signal;
     sigemptyset(*sa.sa_mask);
     sa.sa_flags = SA_ONSTACK | SA_RESTART;
-    sigaction(SIGINT, *sa, null); // Stop
+    sigaction(SIGINT, *sa, null);  // Stop
     sigaction(SIGTERM, *sa, null); // Stop
 
     success = add_signals(*server.wait_group, server, handle_signal_event, SIGINT, SIGTERM);
@@ -260,6 +258,26 @@ listen :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     init_request_thread_group(server, num_threads);
 
     return true;
+}
+
+stop :: (using server: *Server, graceful := true) {
+    if graceful && server.state == .STARTED {
+        server.state = .STOPPING;
+    } else {
+        server.state = .STOPPED;
+    }
+
+    for * server.clients {
+        it.remove_after_request = true;
+    }
+
+    if server.socket != -1 {
+        success := remove_handle(*server.wait_group, server.socket);
+        if !success {
+            log_error("Could not remove server socket from wait group");
+        }
+        close_and_reset(*server.socket);
+    }
 }
 
 Status_Code :: enum u16 {
@@ -296,20 +314,20 @@ code :: (status_code: u16) -> Status_Code {
     return xx status_code;
 }
 
-update :: (using server: *Server) -> bool{
+update :: (using server: *Server) -> bool {
     success := wait_for_events(*wait_group);
     if !success {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t wait for events. Exiting…");
-        should_quit = true;
+        stop(server, graceful = false);
     }
 
-    if !should_quit && should_shut_down && open_connections == 0 {
-        log("No more open connections during shutdown. Qutting…");
-        should_quit = true;
+    if state == .STOPPING && open_connections == 0 {
+        log("No more open connections during shutdown. Server has stopped.");
+        state = .STOPPED;
     }
 
-    return should_quit;
+    return state == .STOPPED;
 }
 
 // @ToDo: Make this take a string builder, an array, …
@@ -339,6 +357,9 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
     if request.http_version == HTTP_1_0 && client.remove_after_request == false {
         append(*builder, "connection: keep-alive\r\n");
+    }
+    if request.http_version == HTTP_1_1 && client.remove_after_request == true {
+        append(*builder, "connection: close\r\n");
     }
     // @Incomplete: custom headers
     print_to_builder(*builder, "content-length: %\r\n", response.count);
@@ -468,16 +489,11 @@ get_reason_string :: (code: Status_Code) -> string {
 
 handle_signal_event :: (group: *Wait_Group, signal: s32, server: *Server) {
     if signal == {
-        // @ToDo @Incomplete: Finish all current requests before exiting.
-        case SIGINT;
-            log("Caught SIGINT. Shutting down…");
-            server.should_shut_down = true;
-        case SIGQUIT;
-            log("Caught SIGQUIT. Shutting down…");
-            server.should_shut_down = true;
+        case SIGINT; #through;
+        case SIGQUIT; #through;
         case SIGTERM;
-            log("Caught SIGTERM. Shutting down…");
-            server.should_shut_down = true;
+            log("Caught signal %. Shutting down…", signal);
+            stop(server, graceful = (server.state == .STARTED));
         case;
             log("Caught unexpected signal: %", signal);
             assert(false);
@@ -491,7 +507,7 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
     if server.verbose log("Receiving new connection (% open connections)", server.open_connections);
     if is_eof {
         log_error("Server socket was closed unexpectedly.");
-        server.should_quit = true;
+        stop(server, graceful = false);
         return;
     }
 
@@ -767,13 +783,14 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         success := parse_request_and_find_route(server, client, request);
         if !success client.remove_after_request = true;
 
+        if server.state != .STARTED client.remove_after_request = true;
+
         assert(!request.yielded_on);
         if !request.response_status_code {
             assert(request.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
             request.phase = .AUTH;
         }
     }
-
     if request.phase == .AUTH && !request.response_status_code {
         if server.auth  && request.auth_mode != .OFF {
             server.auth(request);
