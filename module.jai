@@ -15,25 +15,26 @@
 HANDLE_INVALID :: -1;
 
 Server :: struct {
-    verbose         := false;
-    auth: #type (request: *Request);
+    verbose                     := false;
+    auth:                       #type (request: *Request);
 
-    socket:         s32 = HANDLE_INVALID;
-    wait_group:     Wait_Group;
+    socket:                     s32 = HANDLE_INVALID;
+    wait_group:                 Wait_Group;
 
-    should_quit:    bool;
-    clients:        Bucket_Array(Client, 64);
+    should_shut_down:           bool;
+    should_quit:                bool;
+    clients:                    Bucket_Array(Client, 64);
 
-    routes:         Table(Http_Method, Routing_Node);
-    request_thread_group: Thread_Group;
-    request_done_read_handle:  s32 = HANDLE_INVALID;
-    request_done_write_handle: s32 = HANDLE_INVALID;
+    routes:                     Table(Http_Method, Routing_Node);
+    request_thread_group:       Thread_Group;
+    request_done_read_handle:   s32 = HANDLE_INVALID;
+    request_done_write_handle:  s32 = HANDLE_INVALID;
 
     // Set this function if you need to to run custom initialization code
     // before a worker threads gets started (eg. for setting up custom context fields)
-    init_thread_callback: #type (thread: *Thread);
+    init_thread_callback:       #type (thread: *Thread);
 
-    open_connections: int;
+    open_connections:           int;
 
     requests_that_have_yielded: [..] *Request; // Just for debugging, for now
 }
@@ -303,6 +304,11 @@ update :: (using server: *Server) -> bool{
         should_quit = true;
     }
 
+    if !should_quit && should_shut_down && open_connections == 0 {
+        log("No more open connections during shutdown. Qutting…");
+        should_quit = true;
+    }
+
     return should_quit;
 }
 
@@ -464,14 +470,14 @@ handle_signal_event :: (group: *Wait_Group, signal: s32, server: *Server) {
     if signal == {
         // @ToDo @Incomplete: Finish all current requests before exiting.
         case SIGINT;
-            log("Caught SIGINT. Quitting…");
-            server.should_quit = true;
+            log("Caught SIGINT. Shutting down…");
+            server.should_shut_down = true;
         case SIGQUIT;
-            log("Caught SIGQUIT. Quitting…");
-            server.should_quit = true;
+            log("Caught SIGQUIT. Shutting down…");
+            server.should_shut_down = true;
         case SIGTERM;
-            log("Caught SIGTERM. Quitting…");
-            server.should_quit = true;
+            log("Caught SIGTERM. Shutting down…");
+            server.should_shut_down = true;
         case;
             log("Caught unexpected signal: %", signal);
             assert(false);
