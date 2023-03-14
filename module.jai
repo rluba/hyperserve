@@ -935,10 +935,12 @@ parse_request_and_find_route :: (server: *Server, client: *Client, request: *Req
                 to_lower_in_place(value);
                 if value == "close" {
                     client.remove_after_request = true;
-                } else if request.http_version == HTTP_1_0 && value == "keep-alive" {
+                } else if value == "keep-alive" {
+                    // Note: "Connection: keep-alive" is only specified in HTTP/1.0, but for example Apple Calendar nonetheless sends "Connection: keep-alive" for HTTP/1.1 requests
+                    // So we just accept that too, I guess?
                     client.remove_after_request = false;
                 } else {
-                    log_error("@Incomplete: Handling of connection tokens is not implemented");
+                    log_error("@Incomplete: Handling of connection tokens is not implemented: %", value);
                     respond("Unsupported connection header value", .NOT_IMPLEMENTED);
                     return false;
                 }
