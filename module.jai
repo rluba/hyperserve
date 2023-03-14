@@ -133,7 +133,6 @@ deinit :: (using server: *Server) {
     if request_thread_group.initted && !request_thread_group.should_exit {
         shutdown(*request_thread_group);
     }
-    deinit(*request_thread_group);
 
     for * clients {
         remove_client(server, it);
