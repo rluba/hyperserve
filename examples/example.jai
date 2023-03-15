@@ -37,7 +37,7 @@ main :: () {
             respond("");
         });
         success &= add_route(*server, .GET, "/{prefix}/long/path/but/no/more/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;})) {
-            log("Got long path request with prefix: %!", request.url);
+            log("Got long path request with prefix \"%\": %!", parameters.path.prefix, request.url);
             respond("");
         });
         success &= add_route(*server, .GET, "/{path}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
@@ -45,7 +45,7 @@ main :: () {
             respond("");
         });
         success &= add_route(*server, .GET, "/ping/{path*}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
-            log("Got ping request with path: %", request.url);
+            log("Got ping request with wildcard path \"%\": %", parameters.path.path, request.url);
             respond("");
         });
 

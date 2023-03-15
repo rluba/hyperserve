@@ -36,15 +36,19 @@ Routing_Node :: struct {
     fixed: Table(string, Entry);
     literal: Table(string, *Routing_Node);
     wildcard: Entry;
-    edge: Entry;
+    edge: Entry; // @ToDo: rename to leaf
     parameter: *Routing_Node;
     parameter_index: int; // @ToDo: can probably be removed, using it for debugging atm
 
-    Entry :: struct {
-        parameters: [] string;
-        segments: [] Route_Segment;
+    Entry :: struct { // @ToDo: Rename to Leaf?
+        parameters: [] string; // The names of parameters that lead to this leaf
+        // segments: [] Route_Segment;
         route: Route;
     }
+}
+
+is_empty :: (entry: Routing_Node.Entry) -> bool {
+    return !entry.route.path;
 }
 
 add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .DEFAULT) -> bool {
@@ -79,15 +83,10 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
     }
 
     node := find_or_add(*server.routes, method);
-    return add_route(node, path, handler, auth, parameters, segments, 0);
-}
 
-add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth_mode: Auth_Mode, parameters: [] string, segments: [] Route_Segment, parameter_index: int) -> bool {
-    // @ToDo: This is silly! Create this once and pass it through!
     entry: Routing_Node.Entry;
     entry.parameters = parameters;
-    entry.segments = segments;
-    entry.route.auth_mode = auth_mode;
+    entry.route.auth_mode = auth;
     entry.route.path = path;
     entry.route.parameters_info = type_info(T);
     // entry.route.path_info = type_info(T.path);
@@ -95,7 +94,13 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
     // entry.route.payload_info = type_info(T.payload);
     entry.route.handler = xx handler;
 
-    if parameters.count == parameter_index {
+    return add_route(node, entry, segments, 0);
+}
+
+add_route :: (node: *Routing_Node, entry: Routing_Node.Entry, segments: [] Route_Segment, parameter_index: int) -> bool {
+    path := entry.route.path;
+
+    if entry.parameters.count == parameter_index {
         // Fully literal
 
         length := 0;
@@ -133,39 +138,42 @@ add_route :: (node: *Routing_Node, path: string, handler: (request: *Request, pa
             if !(<<sub_node_pointer) {
                 <<sub_node_pointer = New(Routing_Node);
             }
-            return add_route(<<sub_node_pointer, path, handler, auth_mode, parameters, remaining, parameter_index);
+            return add_route(<<sub_node_pointer, entry, remaining, parameter_index);
         } else if current.wildcard {
             // Wildcard route
-            if node.wildcard.route.path {
+            if !is_empty(node.wildcard) {
                 log_error("Route \"%\" conflicts with route \"%\"", path, node.wildcard.route.path);
                 return false;
             }
 
-            if node.parameter && node.parameter.wildcard.route.path {
+            if node.parameter && !is_empty(node.parameter.wildcard) {
                 log_error("Route \"%\" conflicts with route \"%\"", path, node.parameter.wildcard.route.path);
                 return false;
             }
+
             node.wildcard = entry;
             return true;
         // } else if "prefix/suffix case" {
         } else {
-            // Edge
+            // Normal parameter
             if remaining {
-                if node.wildcard.route.path {
+                if !is_empty(node.wildcard) {
                     log_error("Route \"%\" conflicts with route \"%\"", path, node.wildcard.route.path);
                     return false;
                 }
+
                 if !node.parameter {
                     node.parameter = New(Routing_Node);
                 }
                 node.parameter_index = parameter_index;
 
-                return add_route(node.parameter, path, handler, auth_mode, parameters, remaining, parameter_index + 1);
+                return add_route(node.parameter, entry, remaining, parameter_index + 1);
             } else {
-                if node.edge.route.path {
+                if !is_empty(node.edge) {
                     log_error("Route \"%\" conflicts with route \"%\"", path, node.edge.route.path);
                     return false;
                 }
+
                 node.edge = entry;
                 return true;
             }
