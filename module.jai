@@ -691,44 +691,63 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
         if bytes_read {
             new_data := to_string(buffer.data, bytes_read);
-            if server.verbose log("Client % said: %", client.name, new_data);
+            if server.verbose {
+                builder: String_Builder;
+                append(*builder, new_data);
+                append(*builder, "\nHex version:\n");
+                for i: 0..new_data.count-1 {
+                    print_to_builder(*builder, "% ", formatInt(new_data[i], base = 16, minimum_digits = 2));
+                }
+
+                log("Client % said: %", client.name, builder_to_string(*builder, allocator = temp));
+            }
 
             buffer_size := builder_string_length(*client.pending_data);
-            for i: 0..bytes_read-1 {
-                ch := buffer[i];
-                if ch == #char "\r" {
-                    client.was_cr = true;
-                } else if ch == #char "\n" && client.was_cr {
-                    client.was_cr = false;
-                    client.num_pending_newlines += 1;
-                    if client.num_pending_newlines == {
-                        case 1;
-                            end := buffer_size + i - 1;
-                            assert(end >= 0);
-                            array_add(*client.header_end_offsets, end);
-                        case 2;
-                            if server.verbose log("Header complete!");
-
-                            pending_body_data := to_string(buffer.data + i + 1, bytes_read - i - 1);
-                            pending_body: String_Builder;
-                            append(*pending_body, pending_body_data); // Has to happen before builder_to_string because that will deallocate the buffer that pending_body_data is referencing
-
-                            advance_through_ensured_space(*client.pending_data, i);
-                            header_data := builder_to_string(*client.pending_data);
-                            should_remove = false;
-                            success := hand_off_client_request(server, client, header_data, pending_body);
-                            if !success should_remove = true;
-                            break;
-                    }
-                } else {
-                    client.was_cr = false;
-                    client.num_pending_newlines = 0;
+            if buffer_size == 0 {
+                // Check the first byte to early-fail HTTPS requests.
+                // (eg. when clients don’t know whether a webcal:// URL is HTTP or HTTPS and try the latter).
+                if buffer[0] == 22 { // First byte of TLS handshake
+                    log_error("Client % appears to use TLS. Closing connection…", client.name);
+                    should_remove = true;
                 }
             }
 
-            advance_through_ensured_space(*client.pending_data, bytes_read);
+            if !should_remove {
+                for i: 0..bytes_read-1 {
+                    ch := buffer[i];
+                    if ch == #char "\r" {
+                        client.was_cr = true;
+                    } else if ch == #char "\n" && client.was_cr {
+                        client.was_cr = false;
+                        client.num_pending_newlines += 1;
+                        if client.num_pending_newlines == {
+                            case 1;
+                                end := buffer_size + i - 1;
+                                assert(end >= 0);
+                                array_add(*client.header_end_offsets, end);
+                            case 2;
+                                if server.verbose log("Header complete!");
 
-            // @ToDo: Check agains max header size we want to allow!
+                                pending_body_data := to_string(buffer.data + i + 1, bytes_read - i - 1);
+                                pending_body: String_Builder;
+                                append(*pending_body, pending_body_data); // Has to happen before builder_to_string because that will deallocate the buffer that pending_body_data is referencing
+
+                                advance_through_ensured_space(*client.pending_data, i);
+                                header_data := builder_to_string(*client.pending_data);
+                                should_remove = false;
+                                success := hand_off_client_request(server, client, header_data, pending_body);
+                                if !success should_remove = true;
+                                break;
+                        }
+                    } else {
+                        client.was_cr = false;
+                        client.num_pending_newlines = 0;
+                    }
+                }
+
+                advance_through_ensured_space(*client.pending_data, bytes_read);
+                // @ToDo: Check agains max header size we want to allow!
+            }
         }
     }
 
