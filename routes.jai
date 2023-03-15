@@ -36,12 +36,12 @@ Routing_Node :: struct {
     fixed: Table(string, Entry);
     literal: Table(string, *Routing_Node);
     wildcard: Entry;
-    edge: Entry; // @ToDo: rename to leaf
+    leaf: Entry;
     parameter: *Routing_Node;
     parameter_index: int; // @ToDo: can probably be removed, using it for debugging atm
 
-    Entry :: struct { // @ToDo: Rename to Leaf?
-        parameters: [] string; // The names of parameters that lead to this leaf
+    Entry :: struct {
+        parameters: [] string; // The names of parameters that lead to this leaf entry
         // segments: [] Route_Segment;
         route: Route;
     }
@@ -153,7 +153,6 @@ add_route :: (node: *Routing_Node, entry: Routing_Node.Entry, segments: [] Route
 
             node.wildcard = entry;
             return true;
-        // } else if "prefix/suffix case" {
         } else {
             // Normal parameter
             if remaining {
@@ -169,12 +168,12 @@ add_route :: (node: *Routing_Node, entry: Routing_Node.Entry, segments: [] Route
 
                 return add_route(node.parameter, entry, remaining, parameter_index + 1);
             } else {
-                if !is_empty(node.edge) {
-                    log_error("Route \"%\" conflicts with route \"%\"", path, node.edge.route.path);
+                if !is_empty(node.leaf) {
+                    log_error("Route \"%\" conflicts with route \"%\"", path, node.leaf.route.path);
                     return false;
                 }
 
-                node.edge = entry;
+                node.leaf = entry;
                 return true;
             }
         }
@@ -199,7 +198,10 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
         segment: Route_Segment;
         if param_found {
             if prefix != "" {
-                log_error("Parameters with a string prefix are not yet supported! (Found in part \"%\" of \"%\")", part, path);
+                // We could support prefix/suffix, but it would make general routing much slower and those few roues that need it
+                // can just strip the prefix/suffix from the parameter. :RoutePrefixSuffix:
+                // -rluba, 2023-03-15
+                log_error("Parameters with a string prefix are not supported! (Found in part \"%\" of \"%\")", part, path);
                 return false;
             }
 
@@ -210,7 +212,10 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
                 return false;
             }
             if remainder != "" {
-                log_error("Parameters with a string suffix are not yet supported! (Found in part \"%\" of \"%\")", part, path);
+                // We could support prefix/suffix, but it would make general routing much slower and those few roues that need it
+                // can just strip the prefix/suffix from the parameter. :RoutePrefixSuffix:
+                // -rluba, 2023-03-15
+                log_error("Parameters with a string suffix are not supported! (Found in part \"%\" of \"%\")", part, path);
                 return false;
             }
 

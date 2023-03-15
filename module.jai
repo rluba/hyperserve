@@ -409,9 +409,9 @@ debug_print_routes :: (server: *Server) {
                 for 0..depth - 1 print("    ");
                 print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
             }
-            if node.edge.route.path {
+            if node.leaf.route.path {
                 for 0..depth - 1 print("    ");
-                print("/{%}\n", node.edge.parameters[node.edge.parameters.count - 1]);
+                print("/{%}\n", node.leaf.parameters[node.leaf.parameters.count - 1]);
             }
             if node.parameter {
                 for 0..depth - 1 print("    ");
@@ -1154,10 +1154,10 @@ find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool,
         return success, found, entry, params;
     }
 
-    if !remainder && node.edge.route.path {
-        array_reserve(*parameter_strings, node.edge.parameters.count);
+    if !remainder && node.leaf.route.path {
+        array_reserve(*parameter_strings, node.leaf.parameters.count);
         array_add(*parameter_strings, decoded_segment);
-        return true, true, node.edge, parameter_strings;
+        return true, true, node.leaf, parameter_strings;
     }
 
     if node.parameter {
