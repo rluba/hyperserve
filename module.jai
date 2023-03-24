@@ -37,6 +37,7 @@ Server :: struct {
     // Set this function if you need to to run custom initialization code
     // before a worker threads gets started (eg. for setting up custom context fields)
     init_thread_callback:       #type (thread: *Thread);
+    request_completed_callback: #type (timestamp: Apollo_Time, duration_us: s64, request: *Request);
 
     open_connections:           int;
 
@@ -77,7 +78,8 @@ Base_Request :: struct {
     url: string;
     http_version: string;
 
-    target: string;
+    target: string; // url minus protocol, server, port
+    path: string;   // target without query part
 
     headers: Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
     host: string;
@@ -92,12 +94,18 @@ Base_Request :: struct {
     start_time: Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
 
-    auth_mode: Auth_Mode;
-    handler: Untyped_Request_Handler;
+    route: Route; // Could be a pointer, if we’re sure that the routing table never changes…
     parsed_parameters: *void;
 
     // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
     handler_data: *void;
+}
+
+// returns "" if the header was not set.
+get_header_value :: (request: *Base_Request, header_name: string) -> string, found: bool {
+    value_pointer := table_find_pointer(*request.headers, header_name);
+    if !value_pointer return "", false;
+    return <<value_pointer, true;
 }
 
 Request :: Request_Type;
@@ -805,12 +813,12 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
 
         assert(!request.yielded_on);
         if !request.response_status_code {
-            assert(request.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
+            assert(request.route.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
             request.phase = .AUTH;
         }
     }
     if request.phase == .AUTH && !request.response_status_code {
-        if server.auth  && request.auth_mode != .OFF {
+        if server.auth  && request.route.auth_mode != .OFF {
             server.auth(request);
             if !request.yielded_on && !request.response_status_code {
                 request.phase = .HANDLING;
@@ -821,7 +829,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     if request.phase == .HANDLING {
-        request.handler(request, request.parsed_parameters);
+        request.route.handler(request, request.parsed_parameters);
     }
 
     if !request.yielded_on {
@@ -834,6 +842,8 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         now := current_time_consensus();
         now_string := calendar_to_iso_string(to_calendar(now));
         request_duration_microseconds := to_microseconds(end - request.start_time);
+
+        if server.request_completed_callback server.request_completed_callback(now, request_duration_microseconds, request);
         log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
     }
 
@@ -1014,6 +1024,8 @@ find_route_and_parse_parameters :: (request: *Request) {
     }
 
     found, path, remainder := split_from_left(request.target, #char "?");
+    request.path = path;
+
     query: string;
     fragment: string; // Ignored
     found, query, fragment = split_from_left(remainder, #char "#");
@@ -1112,8 +1124,7 @@ find_route_and_parse_parameters :: (request: *Request) {
             }
         }
 
-        request.auth_mode = entry.route.auth_mode;
-        request.handler = entry.route.handler;
+        request.route = entry.route;
         request.parsed_parameters = params;
     }
 }
@@ -1303,7 +1314,6 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             return false, builder_to_string(*builder);
         case .ARRAY;
             info_array := cast(*Type_Info_Array) info;
-            assert(!info_array.relative_pointer_size, "@Incomplete: relative array arguments are not yet implemented");
             element_size := info_array.element_type.runtime_size;
             element_data: *void;
             array_count_pointer: *s64;
