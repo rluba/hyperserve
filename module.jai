@@ -844,7 +844,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         request_duration_microseconds := to_microseconds(end - request.start_time);
 
         if server.request_completed_callback server.request_completed_callback(now, request_duration_microseconds, request);
-        log("%: % % -> % (%ms)", now_string, request.method, request.url, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
+        log("%: (%) % % -> % % (%ms)", now_string, request.id, request.method, request.url, cast(int) request.response_status_code, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
     }
 
     data: u8 = 1;
