@@ -400,33 +400,34 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
 
 // Print route tree for debugging
 debug_print_routes :: (server: *Server) {
+    print_node :: (node: *Routing_Node, depth: int) {
+        for node.fixed {
+            for 0..depth - 1 print("    ");
+            print("%\n", it_index);
+        }
+        for node.literal {
+            for 0..depth - 1 print("    ");
+            print("/%:\n", it_index);
+            print_node(it, depth + 1);
+        }
+        if node.wildcard.route.path {
+            for 0..depth - 1 print("    ");
+            print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
+        }
+        if node.leaf.route.path {
+            for 0..depth - 1 print("    ");
+            print("/{%}\n", node.leaf.parameters[node.leaf.parameters.count - 1]);
+        }
+        if node.parameter {
+            for 0..depth - 1 print("    ");
+            print("/{param_%}:\n", node.parameter_index);
+            print_node(node.parameter, depth + 1);
+        }
+    }
+
     for node, method: server.routes {
         print("%:\n", method);
         print_node(*node, 1);
-        print_node :: (node: *Routing_Node, depth: int) {
-            for node.fixed {
-                for 0..depth - 1 print("    ");
-                print("%\n", it_index);
-            }
-            for node.literal {
-                for 0..depth - 1 print("    ");
-                print("/%:\n", it_index);
-                print_node(it, depth + 1);
-            }
-            if node.wildcard.route.path {
-                for 0..depth - 1 print("    ");
-                print("/{%*}\n", node.wildcard.parameters[node.wildcard.parameters.count - 1]);
-            }
-            if node.leaf.route.path {
-                for 0..depth - 1 print("    ");
-                print("/{%}\n", node.leaf.parameters[node.leaf.parameters.count - 1]);
-            }
-            if node.parameter {
-                for 0..depth - 1 print("    ");
-                print("/{param_%}:\n", node.parameter_index);
-                print_node(node.parameter, depth + 1);
-            }
-        }
     }
 }
 
