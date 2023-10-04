@@ -9,8 +9,7 @@
 // - Add timeouts for clients: after connect, after first byte, ...
 // …
 
-#module_parameters () (Request_Type: Type = Base_Request, USE_CLUSTER := false);
-// @ToDO: Make sure Request_Type contains a Base_Request
+#module_parameters () (Request_Extra: Type = struct {}, USE_CLUSTER := false);
 
 HANDLE_INVALID :: -1;
 
@@ -108,7 +107,10 @@ get_header_value :: (request: *Base_Request, header_name: string) -> string, fou
     return <<value_pointer, true;
 }
 
-Request :: Request_Type;
+Request :: struct {
+    using #as base: Base_Request;
+    extra: Request_Extra;
+}
 
 Request_Phase :: enum {
     PARSING;
@@ -449,9 +451,8 @@ push_request :: (request: *Request) #expand {
     `defer context.hyperserve.request = old_request;
 }
 
+
 #scope_file
-
-
 
 reset_client_after_request :: (using client: *Client) {
     request_start_time = APOLLO_TIME_INVALID;
@@ -1322,7 +1323,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
                 case .RESIZABLE;
                     array := cast(*Resizable_Array) dest;
                     array_count_pointer = *array.count;
-                    Reflection.maybe_grow(array, element_size);
+                    maybe_grow(array, element_size);
                     element_data = array.data + array.count * element_size;
                 case .VIEW;
                     // @Speed: This is stupidly inefficient.
@@ -1411,3 +1412,26 @@ Reflection :: #import "Reflection";
 #if USE_CLUSTER {
     #import "cluster"; // https://github.com/rluba/cluster
 }
+
+// Copied from Reflection, which doesn’t contain it anymore.
+maybe_grow :: (array: *Resizable_Array, element_size: s64) {
+	if array.count >= array.allocated {
+		reserve := 2 * array.allocated;
+		if reserve < 8  reserve = 8;
+
+		if !array.allocator.proc {
+			if context.allocator.proc {
+				array.allocator      = context.allocator;
+			} else {
+				array.allocator      = context.default_allocator;
+			}
+		}
+
+		array.data = realloc(array.data, reserve * element_size, array.allocated * element_size, array.allocator);
+		assert(array.data != null); // Program will die if we couldn't get memory. We can think about an alternative strategy, but it's hard to know what would be reasonable.
+
+		array.allocated = reserve;
+	}
+}
+
+
