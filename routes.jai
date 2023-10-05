@@ -61,7 +61,9 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
         Path_Type :: type_of(T.path);
         info := cast(*Type_Info_Struct) type_info(Path_Type);
         if info.type != .STRUCT {
-            log_error("Path type must be a struct");
+            builder: String_Builder;
+            print_type_to_builder(*builder, type_info(Path_Type));
+            log_error("While adding route \"% %\": Found path parameters (%), so Path_Type must be a struct, but it was %", method, path, parameters, builder_to_string(*builder, allocator = temp));
             return false;
         }
         // @ToDo: Check query and payload types
