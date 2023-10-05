@@ -85,6 +85,7 @@ Base_Request :: struct {
     authorization: string;
     content_length: int;
     content_type: string;
+    cookies: [..] Cookie;
     // @ToDo: More fields for commonly referenced headers
 
     pending_body: String_Builder;
@@ -98,6 +99,11 @@ Base_Request :: struct {
 
     // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
     handler_data: *void;
+}
+
+Cookie :: struct {
+    name:  string;
+    value: string;
 }
 
 // returns "" if the header was not set.
@@ -956,9 +962,22 @@ parse_request_and_find_route :: (server: *Server, client: *Client, request: *Req
                 result, success, remainder := to_integer(value);
                 if !success || remainder {
                     log_error("Invalid content length: %", value);
+                    respond("Invalid content length", .BAD_REQUEST);
                     return false;
                 }
                 request.content_length = result;
+            case "cookie";
+                remainder := value;
+                while remainder {
+                    found, cookie, remainder= := split_from_left(remainder, #char ";");
+                    found=, name, value := split_from_left(cookie, #char "=");
+                    if !found {
+                        respond("Invalid cookie value", .BAD_REQUEST);
+                        return false;
+                    }
+                    name = trim(name);
+                    array_add(*request.cookies, .{name, value});
+                }
 
             case "content-type";
                 request.content_type = value;
