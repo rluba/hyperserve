@@ -13,9 +13,11 @@
 
 HANDLE_INVALID :: -1;
 
+Auth_Callback :: #type (request: *Request);
+
 Server :: struct {
     verbose                     := false;
-    auth:                       #type (request: *Request);
+    auth:                       Auth_Callback;
 
     socket:                     s32 = HANDLE_INVALID;
     wait_group:                 Wait_Group;
@@ -590,6 +592,9 @@ handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, ser
 
             // Request yielded and is not done yet
             push_allocator(pool_allocator_proc, request.pool);
+            context.hyperserve.server = server;
+            push_client(client);
+            push_request(request);
 
             // @ToDO: We could do this outside the pool...
             reasons_copy := array_copy(request.yielded_on);
