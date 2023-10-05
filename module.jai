@@ -32,8 +32,8 @@ Server :: struct {
 
     routes:                     Table(Http_Method, Routing_Node);
     request_thread_group:       Thread_Group;
-    request_done_read_handle:   s32 = HANDLE_INVALID;
-    request_done_write_handle:  s32 = HANDLE_INVALID;
+    request_step_done_read_handle:   s32 = HANDLE_INVALID;
+    request_step_done_write_handle:  s32 = HANDLE_INVALID;
 
     // Set this function if you need to to run custom initialization code
     // before a worker threads gets started (eg. for setting up custom context fields)
@@ -159,8 +159,8 @@ deinit :: (using server: *Server) {
     deinit(*wait_group);
 
     close_and_reset(*socket);
-    close_and_reset(*request_done_read_handle);
-    close_and_reset(*request_done_write_handle);
+    close_and_reset(*request_step_done_read_handle);
+    close_and_reset(*request_step_done_write_handle);
 }
 
 start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
@@ -246,10 +246,10 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
         return false;
     }
 
-    server.request_done_read_handle  = worker_pipes[0];
-    server.request_done_write_handle = worker_pipes[1];
+    server.request_step_done_read_handle  = worker_pipes[0];
+    server.request_step_done_write_handle = worker_pipes[1];
 
-    success = add_handles(*server.wait_group, server, handle_request_done_event, server.request_done_read_handle);
+    success = add_handles(*server.wait_group, server, handle_request_step_done_event, server.request_step_done_read_handle);
     if !success {
         deinit(server);
         return false;
@@ -564,8 +564,8 @@ on_request_yield_reason_complete :: (reason: *Yield_Reason, data: *void) {
     }
 }
 
-handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
-    assert(handle == server.request_done_read_handle);
+handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
+    assert(handle == server.request_step_done_read_handle);
     assert(!is_eof);
 
     // @Speed: get_completed_work is very, very wasteful if you have lots of workers and
@@ -575,7 +575,7 @@ handle_request_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, ser
     for work: completed_work {
         // @Speed, @ToDo: Read completed_work.count bytes ouside the loop instead
         data: u8;
-        result := repeat_if_interrupted(read(server.request_done_read_handle, *data, 1));
+        result := repeat_if_interrupted(read(server.request_step_done_read_handle, *data, 1));
         if result == -1 {
             error_code, error_string := System.get_error_value_and_string();
             log_error("Could not read from pipe: % %", error_code, error_string);
@@ -831,7 +831,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         }
     }
     if request.phase == .AUTH && !request.response_status_code {
-        if server.auth  && request.route.auth_mode != .OFF {
+        if server.auth && request.route.auth_mode != .OFF {
             server.auth(request);
             if !request.yielded_on && !request.response_status_code {
                 request.phase = .HANDLING;
@@ -861,7 +861,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     data: u8 = 1;
-    result := repeat_if_interrupted(write(server.request_done_write_handle, *data, 1));
+    result := repeat_if_interrupted(write(server.request_step_done_write_handle, *data, 1));
     if result == -1 {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Could not write to pipe: % %", error_code, error_string);
