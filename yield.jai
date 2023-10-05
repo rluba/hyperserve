@@ -61,3 +61,38 @@ on_complete :: (task: *Async_Task) {
     }
 }
 
+// Intermediary function to test yielding. Not the final API.
+// Waits until all tasks have signalled completion
+debug_wait_for :: (tasks: .. *Async_Task) -> bool {
+    wait_group: Wait_Group;
+    init(*wait_group);
+    defer deinit(*wait_group);
+
+    active_tasks: [..] *Async_Task;
+    array_add(*active_tasks, ..tasks);
+    defer array_free(active_tasks);
+    on_complete :: (task: *Async_Task, data: *void) {
+        active_tasks := cast(*[..] *Async_Task) data;
+        array_unordered_remove_by_value(active_tasks, task);
+    }
+
+	for task: tasks {
+        begin(task, *wait_group, *active_tasks, on_complete);
+	}
+
+    while active_tasks {
+        success := wait_for_events(*wait_group);
+        if !success {
+            to_cancel := array_copy(active_tasks); // because cancelling might modify the array via the on_complete callback
+            defer array_free(to_cancel);
+            for to_cancel {
+                it.cancel(it);
+            }
+            assert(active_tasks.count == 0);
+            // @ToDo: cleanup!
+            return false;
+        }
+    }
+
+	return true;
+}

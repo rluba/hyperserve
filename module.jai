@@ -389,26 +389,7 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
 
     // Actually send the response
-    // @ToDo: Do this in a blocking way instead of busy-looping!
-    buffer := get_base_buffer(*builder);
-    while buffer {
-        data := get_buffer_data(buffer);
-        remaining := buffer.count;
-        while remaining {
-            result := send(client.socket, data, cast(u64) remaining, 0);
-            if result == -1 {
-                error_code := get_last_socket_error();
-                error_string := System.get_error_string(error_code);
-                log_error("Could not send response: % %", error_code, error_string);
-                return;
-            }
-            assert(result <= remaining);
-            data += result;
-            remaining -= result;
-        }
-
-        buffer = buffer.next;
-    }
+    send_builder(client.socket, *builder);
 }
 
 // Print route tree for debugging
@@ -468,6 +449,30 @@ proceed_request_past_authentication :: (request: *Request) {
 #load "routes.jai";
 #load "yield.jai";
 
+// @ToDo: Allow async writes to avoid blocking on full socket buffers
+send_builder :: (socket: Socket, builder: *String_Builder) -> bool {
+    // @ToDo: Do this in a blocking way instead of busy-looping!
+    buffer := get_base_buffer(builder);
+    while buffer {
+        data := get_buffer_data(buffer);
+        remaining := buffer.count;
+        while remaining {
+            result := send(socket, data, cast(u64) remaining, 0);
+            if result == -1 {
+                error_code := get_last_socket_error();
+                error_string := System.get_error_string(error_code);
+                log_error("Could not send response: % %", error_code, error_string);
+                return false;
+            }
+            assert(result <= remaining);
+            data += result;
+            remaining -= result;
+        }
+
+        buffer = buffer.next;
+    }
+    return true;
+}
 
 #scope_file
 
