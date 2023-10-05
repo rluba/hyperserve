@@ -13,11 +13,14 @@
 
 HANDLE_INVALID :: -1;
 
-Auth_Callback :: #type (request: *Request);
+Auth_Callback :: #type (request: *Request, is_last_method: bool);
 
 Server :: struct {
     verbose                     := false;
-    auth:                       Auth_Callback;
+
+    // @ToDo: Make overridable per route
+    default_auth_methods:       [..] Auth_Callback; // Will be called in sequence from a request thread to do authentication. Can yield on Async_Tasks. Must call proceed_request_past_authentication() to signal success.
+    routes:                     Table(Http_Method, Routing_Node);
 
     socket:                     s32 = HANDLE_INVALID;
     wait_group:                 Wait_Group;
@@ -30,7 +33,6 @@ Server :: struct {
     };
     clients:                    Bucket_Array(Client, 64);
 
-    routes:                     Table(Http_Method, Routing_Node);
     request_thread_group:       Thread_Group;
     request_step_done_read_handle:   s32 = HANDLE_INVALID;
     request_step_done_write_handle:  s32 = HANDLE_INVALID;
@@ -67,40 +69,41 @@ Client :: struct {
 }
 
 Base_Request :: struct {
-    client: *Client;
-    pool: *Pool;
-    id: string;
-    header_data: string;
+    client:               *Client;
+    pool:                 *Pool;
+    id:                   string;
+    header_data:          string;
 
-    phase: Request_Phase;
-    yielded_on: [..] *Yield_Reason;
+    phase:                Request_Phase;
+    next_auth_method_index := 0;
+    yielded_on:           [..] *Async_Task;
 
-    method: Http_Method;
-    url: string;
-    http_version: string;
+    method:               Http_Method;
+    url:                  string;
+    http_version:         string;
 
-    target: string; // url minus protocol, server, port
-    path: string;   // target without query part
+    target:               string; // url minus protocol, server, port
+    path:                 string;   // target without query part
 
-    headers: Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
-    host: string;
-    authorization: string;
-    content_length: int;
-    content_type: string;
-    cookies: [..] Cookie;
+    headers:              Table(string, string); // @ToDo: Add abstraction for on-the-fly decoding of encoded values?
+    host:                 string;
+    authorization:        string;
+    content_length:       int;
+    content_type:         string;
+    cookies:              [..] Cookie;
     // @ToDo: More fields for commonly referenced headers
 
-    pending_body: String_Builder;
+    pending_body:         String_Builder;
 
     // Internal framework fields for state tracking
-    start_time: Apollo_Time = APOLLO_TIME_INVALID;
+    start_time:           Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
 
-    route: Route; // Could be a pointer, if we’re sure that the routing table never changes…
-    parsed_parameters: *void;
+    route:                Route; // Could be a pointer, if we’re sure that the routing table never changes…
+    parsed_parameters:    *void;
 
     // // @ToDo: Make polymorphic on data and auto-new it before passing the request to the handler
-    handler_data: *void;
+    handler_data:         *void;
 }
 
 Cookie :: struct {
@@ -442,9 +445,6 @@ debug_print_routes :: (server: *Server) {
 }
 
 
-#load "routes.jai";
-#load "yield.jai";
-
 push_client :: (client: *Client) #expand {
     old_client     := context.hyperserve.client;
     context.hyperserve.client  = client;
@@ -458,6 +458,15 @@ push_request :: (request: *Request) #expand {
 
     `defer context.hyperserve.request = old_request;
 }
+
+proceed_request_past_authentication :: (request: *Request) {
+    assert(request.phase == .AUTH);
+    assert(!request.response_status_code);
+    request.phase = .HANDLING;
+}
+
+#load "routes.jai";
+#load "yield.jai";
 
 
 #scope_file
@@ -544,17 +553,13 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
     add_client(server, client_socket, client_addr);
 }
 
-on_request_yield_reason_complete :: (reason: *Yield_Reason, data: *void) {
+on_request_async_task_complete :: (task: *Async_Task, data: *void) {
     request := cast(*Request) data;
     server := request.client.server;
-    array_unordered_remove_by_value(*request.yielded_on, reason);
+    array_unordered_remove_by_value(*request.yielded_on, task);
 
     if !request.yielded_on {
-        // Last yield reason is done! Let’s make progress on this request
-        if request.phase == .AUTH && !request.response_status_code {
-            request.phase = .HANDLING;
-        }
-
+        // Last async task is done! Let’s make progress on this request
         // Re-queue this request for processing on a request thread
         size := server.requests_that_have_yielded.count;
         array_unordered_remove_by_value(*server.requests_that_have_yielded, request);
@@ -563,6 +568,7 @@ on_request_yield_reason_complete :: (reason: *Yield_Reason, data: *void) {
         add_work(*server.request_thread_group, request);
     }
 }
+
 
 handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
     assert(handle == server.request_step_done_read_handle);
@@ -592,17 +598,14 @@ handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool
 
             // Request yielded and is not done yet
             push_allocator(pool_allocator_proc, request.pool);
-            context.hyperserve.server = server;
-            push_client(client);
-            push_request(request);
 
             // @ToDO: We could do this outside the pool...
-            reasons_copy := array_copy(request.yielded_on);
-            for reason: reasons_copy {
-                // @ToDo @Speed: We could schedule all the request reasons on a separate work group
+            tasks_copy := array_copy(request.yielded_on);
+            for task: tasks_copy {
+                // @ToDo @Speed: We could schedule all the request tasks on a separate work group
                 // to avoid overloading the main server’s work group.
                 // (We might start dropping new connect requests if the main thread is too busy.)
-                begin(reason, *server.wait_group, request, on_request_yield_reason_complete);
+                begin(task, *server.wait_group, request, on_request_async_task_complete);
             }
         } else {
             // Request is complete
@@ -830,18 +833,40 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
             request.phase = .AUTH;
         }
     }
+
     if request.phase == .AUTH && !request.response_status_code {
-        if server.auth && request.route.auth_mode != .OFF {
-            server.auth(request);
-            if !request.yielded_on && !request.response_status_code {
-                request.phase = .HANDLING;
-            }
-        } else {
+        if request.route.auth_mode == .OFF {
             request.phase = .HANDLING;
+        } else {
+            auth_methods := server.default_auth_methods; // @ToDo: Allow per-route auth methods
+            if !auth_methods {
+                log_error("Route requires authentication but no auth methods were specified!");
+                respond(status_code = .INTERNAL_SERVER_ERROR);
+            } else {
+                auth_has_failed := true;
+                while request.next_auth_method_index < auth_methods.count {
+                    is_last := (request.next_auth_method_index == auth_methods.count - 1);
+                    auth_method := auth_methods[request.next_auth_method_index];
+                    request.next_auth_method_index += 1;
+                    auth_method(request, is_last);
+                    if request.yielded_on || request.response_status_code {
+                        auth_has_failed = false;
+                        break;
+                    } else if request.phase == .HANDLING {
+                        // Auth method has signalled success, so let’s proceed
+                        auth_has_failed = false;
+                        break;
+                    }
+                }
+                if auth_has_failed {
+                    respond(status_code = .UNAUTHORIZED);
+                }
+            }
         }
     }
 
     if request.phase == .HANDLING {
+        assert(request.response_status_code == 0);
         request.route.handler(request, request.parsed_parameters);
     }
 
@@ -1385,6 +1410,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             return false, "Internal parser error";
     }
 }
+
 
 #scope_module
 
