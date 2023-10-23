@@ -350,7 +350,6 @@ update :: (using server: *Server) -> bool {
     return state == .STOPPED;
 }
 
-// @ToDo: Make this take a string builder, …
 respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain") {
     respond(cast([] u8) response, status_code, content_type);
 }
@@ -358,42 +357,68 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
 respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain") {
     using context.hyperserve;
 
-    if request.response_status_code {
-        log_error("Trying to send a response to request %, but a % response was already sent!", request.id, request.response_status_code);
-        return;
-    }
-
-    status_code_to_send := status_code;
-    if status_code == .AUTO {
-        if response {
-           status_code_to_send = .OK;
-        } else {
-           status_code_to_send = .NO_CONTENT;
-        }
-    }
-
-    request.response_status_code = status_code_to_send;
-
     builder: String_Builder;
     defer free_buffers(*builder);
-    // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
-    print_to_builder(*builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
-    print_to_builder(*builder, "content-type: %; charset=utf-8\r\n", content_type);
-    if request.http_version == HTTP_1_0 && client.remove_after_request == false {
-        append(*builder, "connection: keep-alive\r\n");
-    }
-    if request.http_version == HTTP_1_1 && client.remove_after_request == true {
-        append(*builder, "connection: close\r\n");
-    }
-    // @Incomplete: custom headers
-    print_to_builder(*builder, "content-length: %\r\n", response.count);
-    append(*builder, "\r\n");
+    success := begin_response(*builder, response.count, status_code, content_type);
+    if !success return;
     append(*builder, cast(string) response);
 
     if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
 
     // Actually send the response
     send_builder(client.socket, *builder);
+}
+
+respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, content_type := "text/plain") {
+    using context.hyperserve;
+
+    content_length := builder_string_length(response_builder);
+
+    builder: String_Builder;
+    defer free_buffers(*builder);
+    success := begin_response(*builder, content_length, status_code, content_type);
+    if !success return;
+
+    steal(*builder, response_builder);
+
+    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
+
+    // Actually send the response
+    send_builder(client.socket, *builder);
+}
+
+begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string) -> bool {
+    using context.hyperserve;
+
+    status_code_to_send := status_code;
+    if status_code == .AUTO {
+        if content_length {
+           status_code_to_send = .OK;
+        } else {
+           status_code_to_send = .NO_CONTENT;
+        }
+    }
+
+    if request.response_status_code {
+        log_error("Trying to send a response to request %, but a % response was already sent!", request.id, request.response_status_code);
+        return false;
+    }
+
+    request.response_status_code = status_code_to_send;
+
+    // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
+    print_to_builder(builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
+    print_to_builder(builder, "content-type: %; charset=utf-8\r\n", content_type);
+    if request.http_version == HTTP_1_0 && client.remove_after_request == false {
+        append(builder, "connection: keep-alive\r\n");
+    }
+    if request.http_version == HTTP_1_1 && client.remove_after_request == true {
+        append(builder, "connection: close\r\n");
+    }
+    // @Incomplete: custom headers
+    print_to_builder(builder, "content-length: %\r\n", content_length);
+    append(builder, "\r\n");
+    return true;
 }
 
 // Print route tree for debugging
