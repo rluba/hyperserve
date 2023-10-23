@@ -350,8 +350,12 @@ update :: (using server: *Server) -> bool {
     return state == .STOPPED;
 }
 
-// @ToDo: Make this take a string builder, an array, …
+// @ToDo: Make this take a string builder, …
 respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain") {
+    respond(cast([] u8) response, status_code, content_type);
+}
+
+respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain") {
     using context.hyperserve;
 
     if request.response_status_code {
@@ -384,7 +388,7 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
     // @Incomplete: custom headers
     print_to_builder(*builder, "content-length: %\r\n", response.count);
     append(*builder, "\r\n");
-    append(*builder, response);
+    append(*builder, cast(string) response);
 
     if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
 
