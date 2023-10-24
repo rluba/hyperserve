@@ -15,8 +15,14 @@ HANDLE_INVALID :: -1;
 
 Auth_Callback :: #type (request: *Request, is_last_method: bool);
 
+Verbosity :: enum_flags {
+    NONE    :: 0x00;
+    NORMAL  :: 0x01;
+    TRAFFIC :: 0x02;
+}
+
 Server :: struct {
-    verbose                     := false;
+    verbose                     := Verbosity.NONE;
 
     // @ToDo: Make overridable per route
     default_auth_methods:       [..] Auth_Callback; // Will be called in sequence from a request thread to do authentication. Can yield on Async_Tasks. Must call proceed_request_past_authentication() to signal success.
@@ -381,7 +387,9 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
 
     steal(*builder, response_builder);
 
-    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
+    if server.verbose & .TRAFFIC {
+        log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
+    }
 
     // Actually send the response
     send_builder(client.socket, *builder);
@@ -749,7 +757,7 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
 
         if bytes_read {
             new_data := to_string(buffer.data, bytes_read);
-            if server.verbose {
+            if server.verbose & .TRAFFIC {
                 builder: String_Builder;
                 append(*builder, new_data);
                 append(*builder, "\nHex version:\n");
@@ -1328,7 +1336,7 @@ init_request_thread_group :: (using server: *Server, num_threads: s32) {
     init(*request_thread_group, num_threads, thread_handle_request);
 
     request_thread_group.name    = "Hyperserve Requests";
-    request_thread_group.logging = server.verbose;
+    request_thread_group.logging = (server.verbose & .NORMAL) != 0;
     request_thread_group.data = server; // Do we need this?
     if server.init_thread_callback {
         for * request_thread_group.worker_info {
