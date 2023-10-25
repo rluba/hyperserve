@@ -385,7 +385,7 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
     success := begin_response(*builder, content_length, status_code, content_type);
     if !success return;
 
-    steal(*builder, response_builder);
+    append_and_steal_buffers(*builder, response_builder);
 
     if server.verbose & .TRAFFIC {
         log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
