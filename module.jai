@@ -12,6 +12,7 @@
 #module_parameters () (Request_Extra: Type = struct {}, USE_CLUSTER := false);
 
 HANDLE_INVALID :: -1;
+SEND_TIMEOUT_MS :: 30_000; // ToDo: Make this configurable
 
 Auth_Callback :: #type (request: *Request, is_last_method: bool);
 
@@ -104,6 +105,7 @@ Base_Request :: struct {
     // Internal framework fields for state tracking
     start_time:           Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
+    aborted_response:     bool;
 
     route:                Route; // Could be a pointer, if we’re sure that the routing table never changes…
     parsed_parameters:    *void;
@@ -367,12 +369,10 @@ respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "t
     defer free_buffers(*builder);
     success := begin_response(*builder, response.count, status_code, content_type);
     if !success return;
+
     append(*builder, cast(string) response);
 
-    if server.verbose log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
-
-    // Actually send the response
-    send_builder(client.socket, *builder);
+    finish_sending_response(*builder);
 }
 
 respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, content_type := "text/plain") {
@@ -387,12 +387,7 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
 
     append_and_steal_buffers(*builder, response_builder);
 
-    if server.verbose & .TRAFFIC {
-        log("Responding with:\n%", builder_to_string(*builder, do_reset = false));
-    }
-
-    // Actually send the response
-    send_builder(client.socket, *builder);
+    finish_sending_response(*builder);
 }
 
 begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string) -> bool {
@@ -427,6 +422,20 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
     print_to_builder(builder, "content-length: %\r\n", content_length);
     append(builder, "\r\n");
     return true;
+}
+
+finish_sending_response :: (builder: *String_Builder) {
+    using context.hyperserve;
+
+    if server.verbose & .TRAFFIC {
+        log("Responding with:\n%", builder_to_string(builder, do_reset = false));
+    }
+
+    // Actually send the response
+    success := send_builder(client.socket, builder);
+    if !success {
+        request.aborted_response = true;
+    }
 }
 
 // Print route tree for debugging
@@ -490,10 +499,17 @@ proceed_request_past_authentication :: (request: *Request) {
 send_builder :: (socket: Socket, builder: *String_Builder) -> bool {
     // @ToDo: Do this in a blocking way instead of busy-looping!
     buffer := get_base_buffer(builder);
+    send_star_time := current_time_monotonic();
+    total_bytes_sent: s64;
     while buffer {
         data := get_buffer_data(buffer);
         remaining := buffer.count;
         while remaining {
+            if to_milliseconds(current_time_monotonic() - send_star_time) > SEND_TIMEOUT_MS {
+                log_error("Timeout after %/% bytes while sending response.", total_bytes_sent, builder_string_length(builder));
+                return false;
+            }
+
             result := send(socket, data, cast(u64) remaining, 0);
             if result == -1 {
                 error_code := get_last_socket_error();
@@ -509,6 +525,7 @@ send_builder :: (socket: Socket, builder: *String_Builder) -> bool {
             assert(result <= remaining);
             data += result;
             remaining -= result;
+            total_bytes_sent += result;
         }
 
         buffer = buffer.next;
@@ -935,7 +952,9 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         request_duration_microseconds := to_microseconds(end - request.start_time);
 
         if server.request_completed_callback server.request_completed_callback(now, request_duration_microseconds, request);
-        log("%: (%) % % -> % % (%ms)", now_string, request.id, request.method, request.url, cast(int) request.response_status_code, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO));
+
+        suffix := ifx request.aborted_response then ", aborted" else "";
+        log("%: (%) % % -> % % (%ms%)", now_string, request.id, request.method, request.url, cast(int) request.response_status_code, request.response_status_code, formatFloat(request_duration_microseconds / 1000.0, trailing_width = 2, zero_removal = .NO), suffix);
     }
 
     data: u8 = 1;
