@@ -497,6 +497,11 @@ send_builder :: (socket: Socket, builder: *String_Builder) -> bool {
             result := send(socket, data, cast(u64) remaining, 0);
             if result == -1 {
                 error_code := get_last_socket_error();
+                if error_code == EAGAIN || error_code == EWOULDBLOCK {
+                    sleep_milliseconds(1);
+                    continue; // This is very stupid busy-looping!
+                }
+
                 error_string := System.get_error_string(error_code);
                 log_error("Could not send response: % %", error_code, error_string);
                 return false;
@@ -587,6 +592,12 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
     if client_socket == HANDLE_INVALID {
         error_code, error_string := System.get_error_value_and_string();
         log_error("Couldn’t accept on socket: % %", error_code, error_string);
+        return;
+    }
+    success := set_blocking(client_socket, false);
+    if !success {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Couldn’t set client socket to non-blockgin: % %", error_code, error_string);
         return;
     }
 
