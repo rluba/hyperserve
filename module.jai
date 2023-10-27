@@ -1378,7 +1378,25 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             }
             return true, "";
         // case .FLOAT;
-        // case .BOOL;
+        case .BOOL;
+            lower_value := to_lower_copy(to_parse);
+            bool_pointer := cast(*bool) dest;
+            if lower_value == {
+                case "true"; #through;
+                case "yes"; #through;
+                case "1";
+                    <<bool_pointer = true;
+
+                case "false"; #through;
+                case "no"; #through;
+                case "0";
+                    <<bool_pointer = false;
+
+                case;
+                    return false, "Unsupported boolean value. Supported values are: \"true\", \"yes\", \"1\", \"false\", \"no\", and \"0\"";
+            }
+            return true, "";
+
         case .STRING;
             string_pointer := cast(*string) dest;
             <<string_pointer = to_parse;
