@@ -668,6 +668,9 @@ handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool
             array_add(*server.requests_that_have_yielded, request);
 
             // Request yielded and is not done yet
+            context.hyperserve.server = server;
+            push_client(client);
+            push_request(request);
             push_allocator(pool_allocator_proc, request.pool);
 
             // @ToDO: We could do this outside the pool...
