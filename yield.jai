@@ -26,7 +26,7 @@ begin :: (task: *Async_Task, wait_group: *Wait_Group, on_complete_data: *void, o
     task.on_complete_data = on_complete_data;
     task.on_complete = on_complete;
     if context.hyperserve.request && !task.request  {
-        log("Propagating request % to inner Async_Task…", context.hyperserve.request.id);
+        // log("Propagating request % to inner Async_Task…", context.hyperserve.request.id);
         task.request = context.hyperserve.request;
     }
 

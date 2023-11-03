@@ -20,6 +20,7 @@ Verbosity :: enum_flags {
     NONE    :: 0x00;
     NORMAL  :: 0x01;
     TRAFFIC :: 0x02;
+    THREADS :: 0x04;
 }
 
 Server :: struct {
@@ -237,7 +238,7 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
         return false;
     }
 
-    success = init(*server.wait_group);
+    success = init(*server.wait_group, verbose = false);
     if !success {
         deinit(server);
         return false;
@@ -680,7 +681,7 @@ handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool
         } else {
             // Request is complete
             if client.received_eof || client.remove_after_request {
-                if server.verbose log("Removing client % after request % (% / %)", client.name, request.id, client.received_eof, client.remove_after_request);
+                if server.verbose log("Removing client % after request % (eof: % / remove after request: %)", client.name, request.id, client.received_eof, client.remove_after_request);
                 remove_client(server, client);
             } else {
                 if server.verbose log("Re-queueing client % after request %", client.name, request.id);
@@ -1125,6 +1126,7 @@ parse_request_and_find_route :: (server: *Server, client: *Client, request: *Req
             assert(false);
     }
 
+    if server.verbose & .NORMAL log("Removing after request: %", client.remove_after_request);
     find_route_and_parse_parameters(request);
 
     return true;
@@ -1366,7 +1368,7 @@ init_request_thread_group :: (using server: *Server, num_threads: s32) {
     init(*request_thread_group, num_threads, thread_handle_request);
 
     request_thread_group.name    = "Hyperserve Requests";
-    request_thread_group.logging = (server.verbose & .NORMAL) != 0;
+    request_thread_group.logging = (server.verbose & .THREADS) != 0;
     request_thread_group.data = server; // Do we need this?
     if server.init_thread_callback {
         for * request_thread_group.worker_info {
