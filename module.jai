@@ -106,6 +106,8 @@ Base_Request :: struct {
     // Internal framework fields for state tracking
     start_time:           Apollo_Time = APOLLO_TIME_INVALID;
     response_status_code: Status_Code;
+    response_builder:     String_Builder;
+
     aborted_response:     bool;
 
     route:                Route; // Could be a pointer, if we’re sure that the routing table never changes…
@@ -136,6 +138,7 @@ Request_Phase :: enum {
     PARSING;
     AUTH;
     HANDLING;
+    SENDING_RESPONSE;
 }
 
 HTTP_1_0 :: "HTTP/1.0";
@@ -366,14 +369,12 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
 respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain") {
     using context.hyperserve;
 
-    builder: String_Builder;
-    defer free_buffers(*builder);
-    success := begin_response(*builder, response.count, status_code, content_type);
+    success := begin_response(*request.response_builder, response.count, status_code, content_type);
     if !success return;
 
-    append(*builder, cast(string) response);
+    append(*request.response_builder, cast(string) response);
 
-    finish_sending_response(*builder);
+    start_sending_response();
 }
 
 respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, content_type := "text/plain") {
@@ -382,13 +383,12 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
     content_length := builder_string_length(response_builder);
 
     builder: String_Builder;
-    defer free_buffers(*builder);
-    success := begin_response(*builder, content_length, status_code, content_type);
+    success := begin_response(*request.response_builder, content_length, status_code, content_type);
     if !success return;
 
-    append_and_steal_buffers(*builder, response_builder);
+    append_and_steal_buffers(*request.response_builder, response_builder);
 
-    finish_sending_response(*builder);
+    start_sending_response();
 }
 
 begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string) -> bool {
@@ -425,19 +425,129 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
     return true;
 }
 
-finish_sending_response :: (builder: *String_Builder) {
+start_sending_response :: () {
     using context.hyperserve;
 
     if server.verbose & .TRAFFIC {
-        log("Responding with:\n%", builder_to_string(builder, do_reset = false));
+        log("Responding with:\n%", builder_to_string(*request.response_builder, do_reset = false));
     }
 
-    // Actually send the response
-    success := send_builder(client.socket, builder);
+    task := New(Sending_Task);
+    task.current_response_buffer = get_base_buffer(*request.response_builder);
+    task.current_response_buffer_offset = 0;
+
+    request.phase = .SENDING_RESPONSE;
+    request_yield(task);
+}
+
+Sending_Task :: struct {
+    using #as base: Async_Task;
+    base.begin_work = sending_task_begin_work;
+    base.cancel     = sending_task_cancel;
+
+    sending_start_time:             Apollo_Time;
+    timer: User_Event_Id;
+    current_response_buffer:        *String_Builder.Buffer;
+    current_response_buffer_offset: s64;
+    total_bytes_sent: s64;
+}
+
+sending_task_begin_work :: (task: *Async_Task) {
+    using context.hyperserve;
+
+    sending := cast(*Sending_Task) task;
+
+    success := add_handles(sending.wait_group, sending, can_send_data_event, request.client.socket, event_type = .WRITE);
     if !success {
-        request.aborted_response = true;
+        finalize_sending_task(sending, abort = true);
+        return;
+    }
+    success, sending.timer = add_timer(sending.wait_group, sending, on_send_timeout, SEND_TIMEOUT_MS, recurring = false);
+    if !success {
+        finalize_sending_task(sending, abort = true);
+        return;
     }
 }
+
+sending_task_cancel :: (task: *Async_Task) {
+    sending := cast(*Sending_Task) task;
+    finalize_sending_task(sending, abort = true);
+}
+
+can_send_data_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_Event_Type, task: *Sending_Task) {
+    assert(event_type == .WRITE);
+    request := task.request;
+    push_allocator(pool_allocator_proc, request.pool);
+    client := request.client;
+    socket := request.client.socket;
+
+    flags: MSG;
+    #if OS == .LINUX {
+        flags |= .NOSIGNAL;
+    }
+
+    while task.current_response_buffer {
+        data := get_buffer_data(task.current_response_buffer) + task.current_response_buffer_offset;
+        remaining := task.current_response_buffer.count - task.current_response_buffer_offset;
+        while remaining {
+            result := send(socket, data, cast(u64) remaining, flags);
+            if result == -1 {
+                error_code := get_last_socket_error();
+                if error_code == EAGAIN || error_code == EWOULDBLOCK {
+                    return; // Wait until we’re called again, when there’s more room.
+                }
+
+                error_string := System.get_error_string(error_code);
+                log_error("Could not send response: % %", error_code, error_string);
+                finalize_sending_task(task, abort = true);
+                return;
+            }
+
+            assert(result <= remaining);
+            data += result;
+            task.current_response_buffer_offset += result;
+            remaining -= result;
+            task.total_bytes_sent += result;
+        }
+
+        task.current_response_buffer = task.current_response_buffer.next;
+        task.current_response_buffer_offset = 0;
+    }
+
+    finalize_sending_task(task, abort = false);
+}
+
+on_send_timeout :: (group: *Wait_Group, handle: User_Event_Id, task: *Sending_Task) {
+    finalize_sending_task(task, abort = true);
+}
+
+finalize_sending_task :: (task: *Sending_Task, abort: bool) {
+    request := task.request;
+
+    remove_handle(task.wait_group, request.client.socket, event_type = .WRITE);
+    if task.timer {
+        remove_timer(task.wait_group, task.timer);
+    }
+
+    if abort {
+        if request.client.server.verbose & .NORMAL {
+            log_error("Aborting sending!");
+        }
+        request.aborted_response = true;
+        request.client.remove_after_request = true;
+    }
+
+    on_complete(task);
+}
+
+request_yield :: (tasks: .. *Async_Task) #expand {
+    assert(context.hyperserve.request.yielded_on.count == 0);
+    if tasks.count {
+        array_add(*context.hyperserve.request.yielded_on, .. tasks);
+    }
+    `return;
+}
+
 
 // Print route tree for debugging
 debug_print_routes :: (server: *Server) {
@@ -496,44 +606,6 @@ proceed_request_past_authentication :: (request: *Request) {
 #load "routes.jai";
 #load "yield.jai";
 
-// @ToDo: Allow async writes to avoid blocking on full socket buffers
-send_builder :: (socket: Socket, builder: *String_Builder) -> bool {
-    // @ToDo: Do this in a blocking way instead of busy-looping!
-    buffer := get_base_buffer(builder);
-    send_star_time := current_time_monotonic();
-    total_bytes_sent: s64;
-    while buffer {
-        data := get_buffer_data(buffer);
-        remaining := buffer.count;
-        while remaining {
-            if to_milliseconds(current_time_monotonic() - send_star_time) > SEND_TIMEOUT_MS {
-                log_error("Timeout after %/% bytes while sending response.", total_bytes_sent, builder_string_length(builder));
-                return false;
-            }
-
-            result := send(socket, data, cast(u64) remaining, 0);
-            if result == -1 {
-                error_code := get_last_socket_error();
-                if error_code == EAGAIN || error_code == EWOULDBLOCK {
-                    sleep_milliseconds(1);
-                    continue; // This is very stupid busy-looping!
-                }
-
-                error_string := System.get_error_string(error_code);
-                log_error("Could not send response: % %", error_code, error_string);
-                return false;
-            }
-            assert(result <= remaining);
-            data += result;
-            remaining -= result;
-            total_bytes_sent += result;
-        }
-
-        buffer = buffer.next;
-    }
-    return true;
-}
-
 #scope_file
 
 reset_client_after_request :: (using client: *Client) {
@@ -591,9 +663,10 @@ handle_signal_event :: (group: *Wait_Group, signal: s32, server: *Server) {
     }
 }
 
-handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
+handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_Event_Type, server: *Server) {
     assert(handle == server.socket);
     assert(!is_eof);
+    assert(event_type == .READ);
 
     if server.verbose log("Receiving new connection (% open connections)", server.open_connections);
     if is_eof {
@@ -618,6 +691,14 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: 
         log_error("Couldn’t set client socket to non-blockgin: % %", error_code, error_string);
         return;
     }
+    #if OS == .MACOS {
+        set: s32 = 1;
+        result := setsockopt(client_socket, SOL_SOCKET, SO_NOSIGPIPE, *set, size_of(type_of(set)));
+        if result == -1 {
+            error_value, error_string := System.get_error_value_and_string();
+            log_error("Could not set socket options: error % %", error_value, error_string);
+        }
+    }
 
     server.open_connections += 1;
 
@@ -641,7 +722,8 @@ on_request_async_task_complete :: (task: *Async_Task, data: *void) {
 }
 
 
-handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, server: *Server) {
+handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_Event_Type, server: *Server) {
+    assert(event_type == .READ);
     assert(handle == server.request_step_done_read_handle);
     assert(!is_eof);
 
@@ -696,8 +778,9 @@ handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool
     }
 }
 
-handle_client_event :: (group: *Wait_Group, handle: s32, is_eof: bool, client: *Client) {
+handle_client_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_type: Wait_Event_Type, client: *Client) {
     assert(handle == client.socket);
+    assert(event_type == .READ);
     server := client.server;
     // push_server(server); Necessary?
     push_client(client);
@@ -942,6 +1025,11 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     if request.phase == .HANDLING {
         assert(request.response_status_code == 0);
         request.route.handler(request, request.parsed_parameters);
+    }
+
+    if request.phase == .SENDING_RESPONSE {
+        // Nothing to do here. Either we‘ve just entered this state and have yielded
+        // or we’re done sending and the request is finalized below.
     }
 
     if !request.yielded_on {
@@ -1510,7 +1598,11 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
 #scope_module
 
 read_handle :: (handle: s32, buffer: [] u8) -> success: bool, bytes_read: int {
-    bytes_read := read(handle, buffer.data, cast(u64) buffer.count);
+    flags: MSG;
+    #if OS == .LINUX {
+        flags |= .NOSIGNAL;
+    }
+    bytes_read := recv(handle, buffer.data, cast(u64) buffer.count, flags);
     if bytes_read < 0 {
         read_error := errno();
         if read_error == EAGAIN || read_error == EWOULDBLOCK {
