@@ -503,7 +503,7 @@ can_send_data_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_typ
                 }
 
                 error_string := System.get_error_string(error_code);
-                log_error("Could not send response: % %", error_code, error_string);
+                log_error("Could not send response (after % bytes already sent): % %", task.total_bytes_sent, error_code, error_string);
                 finalize_sending_task(task, abort = true);
                 return;
             }
