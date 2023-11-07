@@ -11,8 +11,11 @@
 
 #module_parameters () (Request_Extra: Type = struct {}, USE_CLUSTER := false);
 
-HANDLE_INVALID :: -1;
-SEND_TIMEOUT_MS :: 30_000; // ToDo: Make this configurable
+HANDLE_INVALID     :: -1;
+
+RECEIVE_HEADER_TIMEOUT_MS :: 30_000; // ToDo: Make this configurable
+RECEIVE_BODY_TIMEOUT_MS   :: 30_000; // ToDo: Make this configurable
+SEND_TIMEOUT_MS           :: 30_000; // ToDo: Make this configurable
 
 Auth_Callback :: #type (request: *Request, is_last_method: bool);
 
@@ -56,23 +59,25 @@ Server :: struct {
 }
 
 Client :: struct {
-    server: *Server;
-    name: string;
-    socket: s32 = HANDLE_INVALID;
-    address: sockaddr_in;
+    server:               *Server;
+    name:                 string;
+    socket:               s32 = HANDLE_INVALID;
+    address:              sockaddr_in;
 
-    next_request_index: int;
+    receive_timer:        User_Event_Id;
 
-    waiting_for_data: bool;
-    received_eof: bool;
+    next_request_index:   int;
+
+    waiting_for_data:     bool;
+    received_eof:         bool;
     remove_after_request: bool;
 
     // Request data
-    request_pool: *Pool;
-    request_start_time: Apollo_Time = APOLLO_TIME_INVALID;
-    pending_data: String_Builder;
-    header_end_offsets: [..] int;
-    was_cr: bool;
+    request_pool:         *Pool;
+    request_start_time:   Apollo_Time = APOLLO_TIME_INVALID;
+    pending_data:         String_Builder;
+    header_end_offsets:   [..] int;
+    was_cr:               bool;
     num_pending_newlines: int;
 }
 
@@ -145,8 +150,8 @@ HTTP_1_0 :: "HTTP/1.0";
 HTTP_1_1 :: "HTTP/1.1";
 
 Hyperserve_Context :: struct {
-    server: *Server;
-    client: *Client;
+    server:  *Server;
+    client:  *Client;
     request: *Request;
 }
 
@@ -799,13 +804,15 @@ handle_client_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_typ
     handle_client_data(server, client, is_eof);
 }
 
+handle_client_timeout :: (group: *Wait_Group, handle: User_Event_Id, client: *Client) {
+    server := client.server;
+    push_client(client);
+    log_error("Timeout while waiting for data from client %. Removing client.", client.name);
+    remove_client(server, client);
+}
+
 add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) {
-    // ToDo: Create an allocator for this client (and also use it for the name)
     client := find_and_occupy_empty_slot(*server.clients);
-    client.server = server;
-    client.name = to_string(client_addr);
-    client.socket = client_socket;
-    client.address = client_addr;
     client.request_pool = New(Pool); // @Speed: We could keep a pool of pools so that we don’t allocate new memory for every client.
     set_allocators(client.request_pool);
 
@@ -813,6 +820,11 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) {
         push_allocator(pool_allocator_proc, client.request_pool);
         remember_allocators(*client.pending_data);
         remember_allocators(*client.header_end_offsets);
+
+        client.server = server;
+        client.name = to_string(client_addr);
+        client.socket = client_socket;
+        client.address = client_addr;
     }
 
     push_client(client);
@@ -830,6 +842,13 @@ add_client_to_wait_group :: (server: *Server, client: *Client) {
         return;
     }
 
+    success, client.receive_timer = add_timer(*server.wait_group, client, handle_client_timeout, RECEIVE_HEADER_TIMEOUT_MS, recurring = false);
+    if !success {
+        log_error("Couldn’t add receive timeout for client % to the server wait group.", client.name);
+        remove_client(server, client);
+        return;
+    }
+
     client.waiting_for_data = true;
 }
 
@@ -839,6 +858,10 @@ remove_client :: (server: *Server, client: *Client) -> success: bool {
         if it.socket == client.socket {
             if client.waiting_for_data {
                 remove_handle(*server.wait_group, client.socket);
+            }
+            if client.receive_timer {
+                remove_timer(*server.wait_group, client.receive_timer);
+                client.receive_timer = 0;
             }
 
             deinit(it);
@@ -853,7 +876,6 @@ remove_client :: (server: *Server, client: *Client) -> success: bool {
 }
 
 deinit :: (client: *Client) {
-    free(client.name);
     close_and_reset(*client.socket);
     release(client.request_pool);
     free(client.request_pool);
@@ -973,6 +995,14 @@ hand_off_client_request :: (using server: *Server, client: *Client, header_data:
     // so we don't want to wake up the server thread and read whenever the client sends more data
     client.waiting_for_data = false;
     remove_handle(*wait_group, client.socket);
+
+    // @Incomplete: We don’t actually wait for bodies yet because we only handle .GET requests :HandleBody:
+    // So we remove the timer here instead of potentially re-setting it until the body is done.
+    // But waiting for the body will be triggered from the request thread once it has found a route and
+    // knows what should happend with the body. So we should start the body timeout from there.
+    // reset_timer(*wait_group, client.receive_timer, RECEIVE_BODY_TIMEOUT_MS, recurring = false);
+    remove_timer(*wait_group, client.receive_timer);
+    client.receive_timer = 0;
 
     add_work(*request_thread_group, request);
 
@@ -1249,6 +1279,9 @@ find_route_and_parse_parameters :: (request: *Request) {
         respond("", .NOT_FOUND);
         return;
     }
+
+    assert(request.method == .GET, "Non-GET requests are not implemented yet!"); // @Incomplete
+    // @ToDo: Wait for the remaining body and maybe parse it for non-GET requests :HandleBody:
 
     found, path, remainder := split_from_left(request.target, #char "?");
     request.path = path;
