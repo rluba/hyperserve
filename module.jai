@@ -685,10 +685,20 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_ty
         log_error("Couldn’t accept on socket: % %", error_code, error_string);
         return;
     }
-    success := set_blocking(client_socket, false);
+
+    success := set_keepalive(client_socket, true, idle_seconds_before_keepalive = 10, keepalive_interval_seconds = 5, num_keepalive_attempts = 4);
     if !success {
         error_code, error_string := System.get_error_value_and_string();
-        log_error("Couldn’t set client socket to non-blockgin: % %", error_code, error_string);
+        log_error("Couldn’t set client socket keepalive: % %", error_code, error_string);
+        close(client_socket);
+        return;
+    }
+
+    success = set_blocking(client_socket, false);
+    if !success {
+        error_code, error_string := System.get_error_value_and_string();
+        log_error("Couldn’t set client socket to non-blocking: % %", error_code, error_string);
+        close(client_socket);
         return;
     }
     #if OS == .MACOS {
@@ -696,7 +706,9 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_ty
         result := setsockopt(client_socket, SOL_SOCKET, SO_NOSIGPIPE, *set, size_of(type_of(set)));
         if result == -1 {
             error_value, error_string := System.get_error_value_and_string();
-            log_error("Could not set socket options: error % %", error_value, error_string);
+            log_error("Could not set socket options: % %", error_value, error_string);
+            close(client_socket);
+            return;
         }
     }
 
@@ -955,7 +967,6 @@ hand_off_client_request :: (using server: *Server, client: *Client, header_data:
     request.pool = client.request_pool;
     request.header_data = header_data;
     request.pending_body = pending_body;
-    // @ToDo: Move this to when we get the first byte!!
     request.start_time = client.request_start_time;
 
     // Further reading is done in the worker thread,
