@@ -127,6 +127,11 @@ Cookie :: struct {
     value: string;
 }
 
+Response_Header :: struct {
+    name:  string;
+    value: string;
+}
+
 // returns "" if the header was not set.
 get_header_value :: (request: *Base_Request, header_name: string) -> string, found: bool {
     value_pointer := table_find_pointer(*request.headers, header_name);
@@ -324,8 +329,11 @@ Status_Code :: enum u16 {
     CREATED                         :: 201;
     ACCEPTED                        :: 202;
     NO_CONTENT                      :: 204;
+    PARTIAL_CONTENT                 :: 206;
+
     MOVED_PERMANENTLY               :: 301;
     FOUND                           :: 302;
+    SEE_OTHER                       :: 303;
     NOT_MODIFIED                    :: 304;
     TEMPORARY_REDIRECT              :: 307;
     PERMANENT_REDIRECT              :: 308;
@@ -367,14 +375,20 @@ update :: (using server: *Server) -> bool {
     return state == .STOPPED;
 }
 
-respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain") {
+redirect :: (target_url: string, status_code := Status_Code.SEE_OTHER) {
+    respond(.[], status_code = status_code, content_type = "text/plain", headers = .[.{"location", target_url}]);
+}
+
+// :ResponseHeaderValues:
+respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain", headers: [] Response_Header = .[]) {
     respond(cast([] u8) response, status_code, content_type);
 }
 
-respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain") {
+// :ResponseHeaderValues:
+respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain", headers: [] Response_Header = .[]) {
     using context.hyperserve;
 
-    success := begin_response(*request.response_builder, response.count, status_code, content_type);
+    success := begin_response(*request.response_builder, response.count, status_code, content_type, headers);
     if !success return;
 
     append(*request.response_builder, cast(string) response);
@@ -382,13 +396,14 @@ respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "t
     start_sending_response();
 }
 
-respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, content_type := "text/plain") {
+// :ResponseHeaderValues:
+respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, content_type := "text/plain", headers: [] Response_Header = .[]) {
     using context.hyperserve;
 
     content_length := builder_string_length(response_builder);
 
     builder: String_Builder;
-    success := begin_response(*request.response_builder, content_length, status_code, content_type);
+    success := begin_response(*request.response_builder, content_length, status_code, content_type, headers);
     if !success return;
 
     append_and_steal_buffers(*request.response_builder, response_builder);
@@ -396,15 +411,16 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
     start_sending_response();
 }
 
-begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string) -> bool {
+// Any values in "headers" must be valid HTTP headers and be already quoted/escaped, if necessary! :ResponseHeaderValues:
+begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string, headers: [] Response_Header = .[]) -> bool {
     using context.hyperserve;
 
     status_code_to_send := status_code;
     if status_code == .AUTO {
         if content_length {
-           status_code_to_send = .OK;
+            status_code_to_send = .OK;
         } else {
-           status_code_to_send = .NO_CONTENT;
+            status_code_to_send = .NO_CONTENT;
         }
     }
 
@@ -424,8 +440,15 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
     if request.http_version == HTTP_1_1 && client.remove_after_request == true {
         append(builder, "connection: close\r\n");
     }
-    // @Incomplete: custom headers
-    print_to_builder(builder, "content-length: %\r\n", content_length);
+
+    for headers {
+        if contains_any_character(it.value, "\r\n") {
+            return false;
+        }
+
+        print_to_builder(builder, "%: %\r\n", it.name, it.value);
+    }
+
     append(builder, "\r\n");
     return true;
 }
@@ -451,10 +474,10 @@ Sending_Task :: struct {
     base.cancel     = sending_task_cancel;
 
     sending_start_time:             Apollo_Time;
-    timer: User_Event_Id;
+    timer:                          User_Event_Id;
     current_response_buffer:        *String_Builder.Buffer;
     current_response_buffer_offset: s64;
-    total_bytes_sent: s64;
+    total_bytes_sent:               s64;
 }
 
 sending_task_begin_work :: (task: *Async_Task) {
@@ -630,8 +653,10 @@ get_reason_string :: (code: Status_Code) -> string {
         case .CREATED;                         return "Created";
         case .ACCEPTED;                        return "Accepted";
         case .NO_CONTENT;                      return "No Content";
+        case .PARTIAL_CONTENT;                 return "Partial Content";
         case .MOVED_PERMANENTLY;               return "Moved Permanently";
         case .FOUND;                           return "Found";
+        case .SEE_OTHER;                       return "See Other";
         case .NOT_MODIFIED;                    return "Not Modified";
         case .TEMPORARY_REDIRECT;              return "Temporary Redirect";
         case .PERMANENT_REDIRECT;              return "Permanent Redirect";
