@@ -103,6 +103,7 @@ Base_Request :: struct {
     authorization:        string;
     content_length:       int;
     content_type:         string;
+    range:                Response_Range;
     cookies:              [..] Cookie;
     // @ToDo: More fields for commonly referenced headers
 
@@ -125,6 +126,11 @@ Base_Request :: struct {
 Cookie :: struct {
     name:  string;
     value: string;
+}
+
+Response_Range :: struct {
+    first_byte: s64 = -1;
+    last_byte:  s64 = -1;
 }
 
 Response_Header :: struct {
@@ -388,12 +394,12 @@ respond :: (response := "", status_code := Status_Code.AUTO, content_type := "te
 respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "text/plain", headers: [] Response_Header = .[]) {
     using context.hyperserve;
 
-    success := begin_response(*request.response_builder, response.count, status_code, content_type, headers);
+    success, range := begin_response(*request.response_builder, response.count, status_code, content_type, headers);
     if !success return;
 
     append(*request.response_builder, cast(string) response);
 
-    start_sending_response();
+    start_sending_response(range);
 }
 
 // :ResponseHeaderValues:
@@ -403,21 +409,27 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
     content_length := builder_string_length(response_builder);
 
     builder: String_Builder;
-    success := begin_response(*request.response_builder, content_length, status_code, content_type, headers);
+    success, range := begin_response(*request.response_builder, content_length, status_code, content_type, headers);
     if !success return;
 
     append_and_steal_buffers(*request.response_builder, response_builder);
 
-    start_sending_response();
+    start_sending_response(range);
 }
 
 // Any values in "headers" must be valid HTTP headers and be already quoted/escaped, if necessary! :ResponseHeaderValues:
-begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string, headers: [] Response_Header = .[]) -> bool {
+begin_response :: (builder: *String_Builder, content_length: s64, status_code: Status_Code, content_type: string, headers: [] Response_Header = .[]) -> bool, range: Response_Range {
     using context.hyperserve;
 
     status_code_to_send := status_code;
     if status_code == .AUTO {
         if content_length {
+            // @ToDo: Enable once we respect the range when sending the body!
+            // if request.range.first_byte < 0 && request.range.last_byte < 0 {
+            //     status_code_to_send = .OK;
+            // } else {
+            //     status_code_to_send = .PARTIAL_CONTENT;
+            // }
             status_code_to_send = .OK;
         } else {
             status_code_to_send = .NO_CONTENT;
@@ -426,7 +438,7 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
 
     if request.response_status_code {
         log_error("Trying to send a response to request %, but a % response was already sent!", request.id, request.response_status_code);
-        return false;
+        return false, .{};
     }
 
     request.response_status_code = status_code_to_send;
@@ -443,17 +455,43 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
 
     for headers {
         if contains_any_character(it.value, "\r\n") {
-            return false;
+            return false, .{};
         }
 
         print_to_builder(builder, "%: %\r\n", it.name, it.value);
     }
 
+    range_to_send: Response_Range; // The actual range we’ll send
+    if status_code_to_send == .PARTIAL_CONTENT {
+        if request.range.first_byte < 0 {
+            assert(request.range.last_byte >= 0);
+            range_to_send.first_byte = content_length - request.range.last_byte;
+            range_to_send.last_byte = content_length - 1;
+        } else if request.range.last_byte < 0 {
+            assert(request.range.first_byte >= 0);
+            range_to_send.first_byte = request.range.first_byte;
+            range_to_send.last_byte = content_length - 1;
+        } else {
+            range_to_send = request.range;
+        }
+
+        // Clamp range
+        if range_to_send.first_byte < 0              range_to_send.first_byte = 0;
+        if range_to_send.last_byte >= content_length range_to_send.last_byte = content_length - 1;
+
+        print_to_builder(builder, "content-range: bytes %-%/%\r\n", range_to_send.first_byte, range_to_send.last_byte, content_length);
+        print_to_builder(builder, "content-length: %\r\n", range_to_send.last_byte - range_to_send.first_byte + 1);
+    } else {
+        range_to_send.first_byte = 0;
+        range_to_send.last_byte = content_length - 1;
+        print_to_builder(builder, "content-length: %\r\n", content_length);
+    }
+
     append(builder, "\r\n");
-    return true;
+    return true, range_to_send;
 }
 
-start_sending_response :: () {
+start_sending_response :: (range: Response_Range) {
     using context.hyperserve;
 
     if server.verbose & .TRAFFIC {
@@ -461,8 +499,10 @@ start_sending_response :: () {
     }
 
     task := New(Sending_Task);
+    task.range = range;
     task.current_response_buffer = get_base_buffer(*request.response_builder);
     task.current_response_buffer_offset = 0;
+    // @ToDo: Skip forward until we’re at the start of the range to send
 
     request.phase = .SENDING_RESPONSE;
     request_yield(task);
@@ -475,6 +515,7 @@ Sending_Task :: struct {
 
     sending_start_time:             Apollo_Time;
     timer:                          User_Event_Id;
+    range:                          Response_Range;
     current_response_buffer:        *String_Builder.Buffer;
     current_response_buffer_offset: s64;
     total_bytes_sent:               s64;
@@ -514,6 +555,7 @@ can_send_data_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_typ
         flags |= .NOSIGNAL;
     }
 
+    // @ToDo: Stop when we’re at the end of the range to send
     while task.current_response_buffer {
         data := get_buffer_data(task.current_response_buffer) + task.current_response_buffer_offset;
         remaining := task.current_response_buffer.count - task.current_response_buffer_offset;
@@ -1238,6 +1280,8 @@ parse_request_and_find_route :: (server: *Server, client: *Client, request: *Req
                     name = trim(name);
                     array_add(*request.cookies, .{name, value});
                 }
+
+            // @ToDo: Parse "Range" (https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range)
 
             case "content-type";
                 request.content_type = value;
