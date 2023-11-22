@@ -309,6 +309,7 @@ stop :: (using server: *Server, graceful := true) {
         server.state = .STOPPED;
     }
 
+    log("Disconnecting % clients…", server.clients.count);
     for * server.clients {
         it.remove_after_request = true;
     }
@@ -367,9 +368,13 @@ update :: (using server: *Server) -> bool {
         stop(server, graceful = false);
     }
 
-    if state == .STOPPING && open_connections == 0 {
-        log("No more open connections during shutdown. Server has stopped.");
-        state = .STOPPED;
+    if state == .STOPPING {
+        if open_connections == 0 {
+            log("No more open connections during shutdown. Server has stopped.");
+            state = .STOPPED;
+        } else {
+            log("Waiting for % open connections to close…", open_connections);
+        }
     }
 
     return state == .STOPPED;
