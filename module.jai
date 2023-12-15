@@ -11,6 +11,73 @@
 
 #module_parameters () (Request_Extra: Type = struct {}, USE_CLUSTER := false);
 
+#if !USE_CLUSTER {
+    // Address definitions from cluster
+    Address_Type :: enum u8 {
+        IPV4 :: 4;
+        IPV6 :: 6;
+    }
+
+    Address :: union {
+        v4: u32;
+        v6: [16] u8;
+    }
+
+    Socket_Address :: struct {
+        type:    Address_Type;
+        port:    u16;
+        address: Address;
+    }
+
+    socket_address :: (addr: sockaddr_in) -> Socket_Address {
+        result: Socket_Address;
+        result.type = .IPV4;
+        result.port = addr.sin_port;
+        #if OS == .WINDOWS {
+            result.address.v4 = ntohl(addr.sin_addr.S_un.S_addr);
+        } else {
+            result.address.v4 = ntohl(addr.sin_addr.s_addr);
+        }
+        return result;
+    }
+
+    socket_address :: (addr: sockaddr_in6) -> Socket_Address {
+        result: Socket_Address;
+        result.type = .IPV6;
+        result.port = addr.sin6_port;
+        #if OS == .WINDOWS {
+            result.address.v6 = addr.sin6_addr.u.Byte;
+        } else #if OS == .MACOS {
+            result.address.v6 = addr.sin6_addr.__u6_addr.__u6_addr8;
+        } else #if OS == .LINUX {
+            result.address.v6 = addr.sin6_addr.__in6_u.__u6_addr8;
+        } else {
+            #assert(false, "Unsupported OS");
+        }
+        return result;
+    }
+
+    format_address :: (type: Address_Type, address: Address) -> string {
+        builder: String_Builder;
+        append(*builder, type, address);
+        return builder_to_string(*builder);
+    }
+
+    format_address :: (address: Socket_Address) -> string {
+        builder: String_Builder;
+        append(*builder, address.type, address.address);
+        print_to_builder(*builder, ":%", address.port);
+        return builder_to_string(*builder);
+    }
+
+    append :: (builder: *String_Builder, type: Address_Type, address: Address) {
+        if #complete type == {
+            case .IPV4; append_address(builder, address.v4);
+            case .IPV6; append_address(builder, address.v6);
+        }
+    }
+}
+
 HANDLE_INVALID     :: -1;
 
 RECEIVE_HEADER_TIMEOUT_MS :: 30_000; // ToDo: Make this configurable
@@ -62,7 +129,7 @@ Client :: struct {
     server:               *Server;
     name:                 string;
     socket:               s32 = HANDLE_INVALID;
-    address:              sockaddr_in;
+    address:              Socket_Address;
 
     receive_timer:        User_Event_Id;
 
@@ -195,7 +262,10 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
 
     result: s32;
     #if USE_CLUSTER {
-        server.socket = cluster_listen(INADDR_ANY, port);
+        address: Address;
+        #assert(size_of(type_of(in6addr_any)) == size_of(type_of(address.v6)));
+        memcpy(address.v6.data, *in6addr_any, size_of(type_of(address.v6)));
+        server.socket = cluster_listen(.IPV6, address, port);
         if server.socket == HANDLE_INVALID {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
@@ -205,7 +275,7 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
     } else {
         // @ToDo: IPv6
         // @ToDo: optionally restrict interface
-        server.socket = socket(AF_INET, .STREAM, 0);
+        server.socket = socket(AF_INET6, .STREAM, 0);
         if server.socket == HANDLE_INVALID {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
@@ -223,7 +293,10 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
             return false;
         }
 
-        result = bind(server.socket, INADDR_ANY, port);
+        address: [16] u8;
+        #assert(size_of(type_of(in6addr_any)) == size_of(type_of(address)));
+        memcpy(address.data, *in6addr_any, size_of(type_of(address)));
+        result = bind(server.socket, address, port);
         if result == -1 {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
@@ -711,9 +784,10 @@ handle_connect_event :: (group: *Wait_Group, handle: s32, is_eof: bool, event_ty
     }
 
     #if USE_CLUSTER {
-        client_socket, client_addr := cluster_accept(server.socket);
+        client_socket, client_addr := cluster_accept(.IPV6, server.socket);
     } else {
-        client_socket, client_addr := accept(server.socket);
+        client_socket, client_sock_addr := accept_v6(server.socket);
+        client_addr := socket_address(client_sock_addr);
     }
     if client_socket == HANDLE_INVALID {
         error_code, error_string := System.get_error_value_and_string();
@@ -841,7 +915,7 @@ handle_client_timeout :: (group: *Wait_Group, handle: User_Event_Id, client: *Cl
     remove_client(server, client);
 }
 
-add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) {
+add_client :: (server: *Server, client_socket: s32, client_addr: Socket_Address) {
     client := find_and_occupy_empty_slot(*server.clients);
     client.request_pool = New(Pool); // @Speed: We could keep a pool of pools so that we don’t allocate new memory for every client.
     set_allocators(client.request_pool);
@@ -852,7 +926,7 @@ add_client :: (server: *Server, client_socket: s32, client_addr: sockaddr_in) {
         remember_allocators(*client.header_end_offsets);
 
         client.server = server;
-        client.name = to_string(client_addr);
+        client.name = format_address(client_addr);
         client.socket = client_socket;
         client.address = client_addr;
     }
