@@ -63,7 +63,7 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
         if info.type != .STRUCT {
             builder: String_Builder;
             print_type_to_builder(*builder, type_info(Path_Type));
-            log_error("While adding route \"% %\": Found path parameters (%), so Path_Type must be a struct, but it was %", method, path, parameters, builder_to_string(*builder, allocator = temp));
+            log_error("While adding route \"% %\": Found path parameters (%), so Path_Type must be a struct, but it was %", method, path, parameters, builder_to_string(*builder,, temp));
             return false;
         }
         // @ToDo: Check query and payload types
@@ -251,7 +251,7 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
 
             array_add(*parameters, parameter);
         } else {
-            segment.literal = to_lower_copy(part, allocator = context.allocator);
+            segment.literal = to_lower_copy_new(part);
         }
         array_add(*segments, segment);
     }
