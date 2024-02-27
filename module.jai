@@ -273,7 +273,6 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
             return false;
         }
     } else {
-        // @ToDo: IPv6
         // @ToDo: optionally restrict interface
         server.socket = socket(AF_INET6, .STREAM, 0);
         if server.socket == HANDLE_INVALID {
@@ -283,12 +282,22 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
             return false;
         }
 
-        reuse_addr: s32 = 1;
-        result = setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *reuse_addr, size_of(type_of(reuse_addr)));
+        one: s32 = 1;
+        zero: s32 = 0;
+        result = setsockopt(server.socket, SOL_SOCKET, SO_REUSEADDR, *one, size_of(type_of(one)));
         if result == -1 {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
-            log_error("Couldn’t set socket options: % %", error_code, error_string);
+            log_error("Couldn’t set socket option SO_REUSEADDR: % %", error_code, error_string);
+            deinit(server);
+            return false;
+        }
+
+        result = setsockopt(server.socket, SOL_IPV6, IPV6_V6ONLY, *zero, size_of(type_of(zero)));
+        if result == -1 {
+            error_code := get_last_socket_error();
+            error_string := System.get_error_string(error_code);
+            log_error("Couldn’t set socket option IPV6_V6ONLY: % %", error_code, error_string);
             deinit(server);
             return false;
         }
