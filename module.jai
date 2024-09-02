@@ -528,12 +528,23 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         append(builder, "connection: close\r\n");
     }
 
+    has_size_header := false;
     for headers {
         if contains_any_character(it.value, "\r\n") {
             return false;
         }
 
         print_to_builder(builder, "%: %\r\n", it.name, it.value);
+        lower_name := to_lower_copy_new(it.name,, temp);
+        if lower_name == {
+            case "content-length"; #through;
+            case "transfer-encoding";
+                has_size_header = true;
+        }
+    }
+
+    if !has_size_header {
+        print_to_builder(builder, "content-length: %\r\n", content_length);
     }
 
     append(builder, "\r\n");
@@ -1138,9 +1149,9 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
 
         if server.state != .STARTED client.remove_after_request = true;
 
-        assert(!request.yielded_on);
         if !request.response_status_code {
             assert(request.route.handler != null, "parse_request_and_find_route neither replied nor found a request handler");
+            assert(!request.yielded_on);
             request.phase = .AUTH;
         }
     }
