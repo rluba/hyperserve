@@ -173,6 +173,8 @@ Base_Request :: struct {
     cookies:              [..] Cookie;
     // @ToDo: More fields for commonly referenced headers
 
+    is_event_stream:     bool;
+
     pending_body:         String_Builder;
 
     // Internal framework fields for state tracking
@@ -529,7 +531,11 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         append(builder, "connection: close\r\n");
     }
 
-    has_size_header := false;
+    size_header_needs_to_be_added := true;
+    if content_type == "text/event-stream" {
+        request.is_event_stream = true;
+        size_header_needs_to_be_added = false;
+    }
     for headers {
         if contains_any_character(it.value, "\r\n") {
             return false;
@@ -540,11 +546,16 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         if lower_name == {
             case "content-length"; #through;
             case "transfer-encoding";
-                has_size_header = true;
+                size_header_needs_to_be_added = false;
+            case "content-type";
+                if it.value == "text/event-stream" {
+                    request.is_event_stream = true;
+                    size_header_needs_to_be_added = false;
+                }
         }
     }
 
-    if !has_size_header {
+    if size_header_needs_to_be_added {
         print_to_builder(builder, "content-length: %\r\n", content_length);
     }
 
@@ -732,6 +743,7 @@ proceed_request_past_authentication :: (request: *Request) {
 
 #load "routes.jai";
 #load "yield.jai";
+#load "sse.jai";
 
 #scope_file
 
@@ -905,7 +917,7 @@ handle_request_step_done_event :: (group: *Wait_Group, handle: s32, is_eof: bool
                 // (We might start dropping new connect requests if the main thread is too busy.)
                 begin(task, *server.wait_group, request, on_request_async_task_complete);
             }
-        } else {
+        } else if !request.is_event_stream {
             // Request is complete
             if client.received_eof || client.remove_after_request {
                 if server.verbose log("Removing client % after request % (eof: % / remove after request: %)", client.name, request.id, client.received_eof, client.remove_after_request);
