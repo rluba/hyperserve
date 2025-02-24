@@ -535,7 +535,7 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         }
 
         print_to_builder(builder, "%: %\r\n", it.name, it.value);
-        lower_name := to_lower_copy_new(it.name,, temp);
+        lower_name := to_lower_copy(it.name,, temp);
         if lower_name == {
             case "content-length"; #through;
             case "transfer-encoding";
@@ -1670,7 +1670,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             return true, "";
         // case .FLOAT;
         case .BOOL;
-            lower_value := to_lower_copy_new(to_parse,, temp);
+            lower_value := to_lower_copy(to_parse,, temp);
             bool_pointer := cast(*bool) dest;
             if lower_value == {
                 case "true"; #through;
@@ -1695,7 +1695,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
         case .ENUM;
             info_enum := cast(*Type_Info_Enum) info;
             // @ToDo: Allow other normalization
-            normalized_value := to_upper_copy_new(to_parse,, temp);
+            normalized_value := to_upper_copy(to_parse,, temp);
             for name: info_enum.names {
                 if name == normalized_value {
                     int_value := info_enum.values[it_index];
@@ -1708,7 +1708,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             builder: String_Builder;
             append(*builder, "Invalid value. Allowed: ");
             for name: info_enum.names {
-                normalized_name := to_lower_copy_new(name,, temp);
+                normalized_name := to_lower_copy(name,, temp);
                 if it_index append(*builder, ", ");
                 append(*builder, normalized_name);
             }

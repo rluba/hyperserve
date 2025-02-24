@@ -251,7 +251,7 @@ analyze_path :: (path: string) -> success: bool, parameters: [] string = .[], se
 
             array_add(*parameters, parameter);
         } else {
-            segment.literal = to_lower_copy_new(part);
+            segment.literal = to_lower_copy(part);
         }
         array_add(*segments, segment);
     }
