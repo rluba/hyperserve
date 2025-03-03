@@ -381,6 +381,7 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
 
     init_request_thread_group(server, num_threads);
 
+    server.state = .STARTED;
     return true;
 }
 

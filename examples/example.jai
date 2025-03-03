@@ -17,37 +17,37 @@ main :: () {
     }
 
     server: Server;
-    server.verbose = args.verbose;
+    server.verbose = ifx args.verbose then .NORMAL else .NONE;
 
     {
         success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters()) {
             log("Got root request!");
             respond("pretend this is index.html", content_type = "text/html");
-        });
+        }, auth = .OFF);
         success &= add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters()) {
             respond("pong", content_type = "text/plain");
-        });
+        }, auth = .OFF);
         success &= add_route(*server, .POST, "/", (request: *Request, parameters: *Request_Parameters()) {
             log("Got root POST!");
             respond("Something was wrong with your post", 422);
-        });
+        }, auth = .OFF);
 
         success &= add_route(*server, .GET, "/long/path/but/no/params", (request: *Request, parameters: *Request_Parameters()) {
             log("Got long path request!");
             respond("");
-        });
+        }, auth = .OFF);
         success &= add_route(*server, .GET, "/{prefix}/long/path/but/no/more/params", (request: *Request, parameters: *Request_Parameters(struct {prefix: string;})) {
             log("Got long path request with prefix \"%\": %!", parameters.path.prefix, request.url);
             respond("");
-        });
+        }, auth = .OFF);
         success &= add_route(*server, .GET, "/{path}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
             log("Got path request: %", request.url);
             respond("");
-        });
+        }, auth = .OFF);
         success &= add_route(*server, .GET, "/ping/{path*}", (request: *Request, parameters: *Request_Parameters(struct {path: string;})) {
             log("Got ping request with wildcard path \"%\": %", parameters.path.path, request.url);
             respond("");
-        });
+        }, auth = .OFF);
 
         {
             Path_Params :: struct {
@@ -66,7 +66,7 @@ main :: () {
                 log("Got members request with parameters: %", <<parameters);
                 context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 5;
                 // @ToDo: reply
-            });
+            }, auth = .OFF);
         }
         if !success exit(1);
 
