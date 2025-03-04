@@ -17,12 +17,12 @@ main :: () {
     }
 
     server: Server;
-    server.verbose = args.verbose;
+    server.verbose = xx args.verbose;
 
     {
         success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters()) {
             log("Got root request!");
-            respond("pretend this is index.html", content_type = "text/html");
+            respond(INDEX_PAGE, content_type = "text/html");
         });
         success &= add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters()) {
             respond("pong", content_type = "text/plain");
@@ -48,6 +48,17 @@ main :: () {
             log("Got ping request with wildcard path \"%\": %", parameters.path.path, request.url);
             respond("");
         });
+
+        custom_auth_methods: [] Auth_Callback = .[
+            (request: *Request, is_last_method: bool) {
+                proceed_request_past_authentication(request);
+            }
+        ];
+
+        success &= add_route(*server, .GET, "/custom/authentication", (request: *Request, parameters: *Request_Parameters()) {
+            log("Got a custom authentication request!");
+            respond("");
+        }, auth = .CUSTOM, auth_methods = custom_auth_methods);
 
         {
             Path_Params :: struct {
@@ -85,6 +96,19 @@ main :: () {
         reset_temporary_storage();
     }
 }
+
+INDEX_PAGE :: #string HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>hyperserve</title>
+</head>
+<body>
+    This is the index page.
+</body>
+</html>
+HTML
 
 #import,file "../module.jai";
 
