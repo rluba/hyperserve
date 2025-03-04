@@ -22,7 +22,7 @@ main :: () {
     {
         success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters()) {
             log("Got root request!");
-            respond("pretend this is index.html", content_type = "text/html");
+            respond(INDEX_PAGE, content_type = "text/html");
         }, auth = .OFF);
         success &= add_route(*server, .GET, "/ping", (request: *Request, parameters: *Request_Parameters()) {
             respond("pong", content_type = "text/plain");
@@ -85,6 +85,19 @@ main :: () {
         reset_temporary_storage();
     }
 }
+
+INDEX_PAGE :: #string HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>hyperserve</title>
+</head>
+<body>
+    This is the index page.
+</body>
+</html>
+HTML
 
 #import,file "../module.jai";
 
