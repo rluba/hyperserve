@@ -51,7 +51,7 @@ is_empty :: (entry: Routing_Node.Entry) -> bool {
     return !entry.route.path;
 }
 
-add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .DEFAULT) -> bool {
+add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .OFF) -> bool {
     success, parameters, segments := analyze_path(path);
     if !success then return false;
 
