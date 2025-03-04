@@ -17,7 +17,7 @@ main :: () {
     }
 
     server: Server;
-    server.verbose = args.verbose;
+    server.verbose = xx args.verbose;
 
     {
         success := add_route(*server, .GET, "/", (request: *Request, parameters: *Request_Parameters()) {
