@@ -49,6 +49,17 @@ main :: () {
             respond("");
         }, auth = .OFF);
 
+        custom_auth_methods: [] Auth_Callback = .[
+            (request: *Request, is_last_method: bool) {
+                proceed_request_past_authentication(request);
+            }
+        ];
+
+        success &= add_route(*server, .GET, "/custom/authentication", (request: *Request, parameters: *Request_Parameters()) {
+            log("Got a custom authentication request!");
+            respond("");
+        }, auth = .CUSTOM, auth_methods = custom_auth_methods);
+
         {
             Path_Params :: struct {
                 id: u64;

@@ -13,6 +13,7 @@ Untyped_Request_Handler :: #type (request: *Request, parameters: *void);
 Auth_Mode :: enum {
     DEFAULT;
     OFF;
+    CUSTOM;
 }
 
 Route :: struct {
@@ -24,6 +25,7 @@ Route :: struct {
     // payload_info:    *Type_Info;
 
     handler:         Untyped_Request_Handler;
+    auth_methods:    [] Auth_Callback; // Overrides Server.default_auth_methods if auth_mode is .CUSTOM.
 }
 
 Route_Segment :: struct {
@@ -51,7 +53,7 @@ is_empty :: (entry: Routing_Node.Entry) -> bool {
     return !entry.route.path;
 }
 
-add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .DEFAULT) -> bool {
+add_route :: (server: *Server, method: Http_Method, path: string, handler: (request: *Request, parameters: *$T/Request_Parameters), auth: Auth_Mode = .DEFAULT, auth_methods: [] Auth_Callback = .[]) -> bool {
     success, parameters, segments := analyze_path(path);
     if !success then return false;
 
@@ -84,6 +86,11 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
         }
     }
 
+    if auth == .CUSTOM && auth_methods.count == 0 {
+        log_error("CUSTOM auth mode requires at least one Auth_Callback in auth_methods");
+        return false;
+    }
+
     node := find_or_add(*server.routes, method);
 
     entry: Routing_Node.Entry;
@@ -95,6 +102,7 @@ add_route :: (server: *Server, method: Http_Method, path: string, handler: (requ
     // entry.route.query_info = type_info(T.query);
     // entry.route.payload_info = type_info(T.payload);
     entry.route.handler = xx handler;
+    entry.route.auth_methods = auth_methods;
 
     return add_route(node, entry, segments, 0);
 }
