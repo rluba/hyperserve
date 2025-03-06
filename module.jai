@@ -1027,7 +1027,10 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
             return;
         }
 
-        if bytes_read {
+        if bytes_read == 0 {
+            if server.verbose log("Client % closed the connection.", client.name);
+            should_remove = true;
+        } else {
             new_data := to_string(buffer.data, bytes_read);
             if server.verbose & .TRAFFIC {
                 builder: String_Builder;
