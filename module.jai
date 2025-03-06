@@ -96,7 +96,6 @@ Verbosity :: enum_flags {
 Server :: struct {
     verbose                     := Verbosity.NONE;
 
-    // @ToDo: Make overridable per route
     default_auth_methods:       [..] Auth_Callback; // Will be called in sequence from a request thread to do authentication. Can yield on Async_Tasks. Must call proceed_request_past_authentication() to signal success.
     routes:                     Table(Http_Method, Routing_Node);
 
@@ -1028,7 +1027,10 @@ handle_client_data :: (server: *Server, client: *Client, is_eof: bool) {
             return;
         }
 
-        if bytes_read {
+        if bytes_read == 0 {
+            if server.verbose log("Client % closed the connection.", client.name);
+            should_remove = true;
+        } else {
             new_data := to_string(buffer.data, bytes_read);
             if server.verbose & .TRAFFIC {
                 builder: String_Builder;
@@ -1160,7 +1162,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
         if request.route.auth_mode == .OFF {
             request.phase = .HANDLING;
         } else {
-            auth_methods := server.default_auth_methods; // @ToDo: Allow per-route auth methods
+            auth_methods := ifx request.route.auth_mode == .CUSTOM then request.route.auth_methods else server.default_auth_methods;
             if !auth_methods {
                 log_error("Route requires authentication but no auth methods were specified!");
                 respond(status_code = .INTERNAL_SERVER_ERROR);
