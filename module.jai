@@ -555,19 +555,6 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         }
     }
 
-    if request.is_event_stream
-    {
-        client := request.client;
-
-        if client.waiting_for_data {
-            remove_handle(*server.wait_group, client.socket);
-        }
-        if client.receive_timer {
-            remove_timer(*server.wait_group, client.receive_timer);
-            client.receive_timer = 0;
-        }
-    }
-
     if size_header_needs_to_be_added {
         print_to_builder(builder, "content-length: %\r\n", content_length);
     }
@@ -588,6 +575,20 @@ start_sending_response :: () {
     task.current_response_buffer_offset = 0;
 
     request.phase = .SENDING_RESPONSE;
+    request_yield(task);
+}
+
+flush :: () {
+    using context.hyperserve;
+
+    if server.verbose & .TRAFFIC {
+        log("Sending:\n%", builder_to_string(*request.response_builder, do_reset = false));
+    }
+
+    task := New(Sending_Task);
+    task.current_response_buffer = get_base_buffer(*request.response_builder);
+    task.current_response_buffer_offset = 0;
+
     request_yield(task);
 }
 
@@ -686,6 +687,8 @@ finalize_sending_task :: (task: *Sending_Task, abort: bool) {
         }
         request.aborted_response = true;
         request.client.remove_after_request = true;
+    } else {
+        reset(*request.response_builder);
     }
 
     on_complete(task);
@@ -756,7 +759,6 @@ proceed_request_past_authentication :: (request: *Request) {
 
 #load "routes.jai";
 #load "yield.jai";
-#load "sse.jai";
 
 remove_client :: (server: *Server, client: *Client) -> success: bool {
     if server.verbose log("Removing a client (% open connections)", server.open_connections);
@@ -1214,7 +1216,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     if request.phase == .HANDLING {
-        assert(request.response_status_code == 0);
+        // assert(request.response_status_code == 0);
         request.route.handler(request, request.parsed_parameters);
     }
 
