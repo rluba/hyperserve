@@ -66,8 +66,8 @@ updates :: (request: *Request, parameters: *Request_Parameters()) {
     if #complete phase == {
       case .INIT;
         SSE_HEADERS := Response_Header.[
-            .{ name  = "Cache-Control", value = "no-cache",                         },
-            .{ name  = "Connection",    value = "keep-alive",                       },
+            .{ name  = "Cache-Control", value = "no-cache"   },
+            .{ name  = "Connection",    value = "keep-alive" },
         ];
 
         if !begin_response(*request.response_builder, content_length = 0, status_code = 200, content_type = "text/event-stream", headers = SSE_HEADERS) {
