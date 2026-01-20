@@ -51,7 +51,6 @@ END
 Request_State :: struct {
     counter    : int;
     phase      : Counter_Phase;
-    session_id : string;
 }
 
 Counter_Phase :: enum {
