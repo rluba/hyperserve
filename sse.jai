@@ -31,7 +31,7 @@ push_sse_handle :: inline (sse: *SSE_Handle) #expand // bit of a misnomer
     `defer context.allocator = old_allocator;
 }
 
-initialize_sse_event_stream :: (session_id: string) -> *SSE_Handle
+initialize_sse :: (session_id: string, sse_allocator := context.default_allocator) -> *SSE_Handle
 {
     using context.hyperserve;
 
@@ -39,9 +39,9 @@ initialize_sse_event_stream :: (session_id: string) -> *SSE_Handle
     * initialize the SSE handler *
     *****************************/
 
-    sse_handle := New(SSE_Handle);
+    sse_handle := New(SSE_Handle,, sse_allocator);
     sse_handle.request = request;
-    sse_handle.close_after_sending = New(bool);
+    sse_handle.close_after_sending = New(bool,, sse_allocator);
     init(*sse_handle.mutex);
     success: bool;
     success, sse_handle.event_id = add_user_event(*server.wait_group, sse_handle, user_send_sse_data);
@@ -74,7 +74,7 @@ initialize_sse_event_stream :: (session_id: string) -> *SSE_Handle
     }
     send_sse_event(sse_handle, *builder);
 
-    request.phase = .SENDING_RESPONSE; // TODO: is this necessary?
+    request.phase = .HANDLING;
 
     return sse_handle;
 }
@@ -90,20 +90,19 @@ send_sse_event :: (sse_handle: *SSE_Handle, event_builder: *String_Builder, clos
 
     sse_handle.close_after_sending.* = close_after_sending;
 
-    response_was_empty := get_base_buffer(*request.response_builder).count == 0;
+    response_buffer_was_empty := get_base_buffer(*request.response_builder).count == 0;
     append_and_steal_buffers(*request.response_builder, event_builder);
 
-    // if the response was empty, we need to trigger a user event to send the response.
+    // if the response buffer was empty, we need to trigger a user event to send the response.
     //
-    // if it is empty, some other call to this function has already appended to response_builder
+    // if it wasn't empty, some other call to this function has already appended to response_builder
     // and triggered the user event, and the user handler func has yet to take the lock and start
     // sending the response. since we already appended this sse event to the response_builder, we
     // can just return since the previously-triggered user handler will handle the sending for us.
-    if response_was_empty
-    {
-        return trigger_user_event(*server.wait_group, sse_handle.event_id);
+    if !response_buffer_was_empty {
+        return true;
     }
-    return true;
+    return trigger_user_event(*server.wait_group, sse_handle.event_id);
 }
 
 user_send_sse_data :: (group: *Wait_Group, event_id: User_Event_Id, sse_handle: *SSE_Handle)

@@ -205,7 +205,7 @@ Response_Header :: struct {
 get_header_value :: (request: *Base_Request, header_name: string) -> string, found: bool {
     value_pointer := table_find_pointer(*request.headers, header_name);
     if !value_pointer return "", false;
-    return <<value_pointer, true;
+    return value_pointer.*, true;
 }
 
 Request :: struct {
@@ -552,6 +552,19 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
                     request.is_event_stream = true;
                     size_header_needs_to_be_added = false;
                 }
+        }
+    }
+
+    if request.is_event_stream
+    {
+        client := request.client;
+
+        if client.waiting_for_data {
+            remove_handle(*server.wait_group, client.socket);
+        }
+        if client.receive_timer {
+            remove_timer(*server.wait_group, client.receive_timer);
+            client.receive_timer = 0;
         }
     }
 
@@ -1528,7 +1541,7 @@ find_route_and_parse_parameters :: (request: *Request) {
 
 // @Cleanup, @Speed: The parameter handling and array stuff is very, very silly atm.
 find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool, entry: Routing_Node.Entry, parameter_strings: [..] string {
-    if context.hyperserve.server.verbose log("Trying to find route for \"%\" in %", path, <<node);
+    if context.hyperserve.server.verbose log("Trying to find route for \"%\" in %", path, node.*);
     parameter_strings: [..] string;
 
     if !path {
@@ -1558,7 +1571,7 @@ find_route :: (node: *Routing_Node, path: string) -> success: bool, found: bool,
 
     literal_node := table_find_pointer(*node.literal, decoded_segment);
     if literal_node {
-        success, found, entry, params := find_route(<<literal_node, remainder);
+        success, found, entry, params := find_route(literal_node.*, remainder);
         return success, found, entry, params;
     }
 
@@ -1689,12 +1702,12 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
                 case "true"; #through;
                 case "yes"; #through;
                 case "1";
-                    <<bool_pointer = true;
+                    bool_pointer.* = true;
 
                 case "false"; #through;
                 case "no"; #through;
                 case "0";
-                    <<bool_pointer = false;
+                    bool_pointer.* = false;
 
                 case;
                     return false, "Unsupported boolean value. Supported values are: \"true\", \"yes\", \"1\", \"false\", \"no\", and \"0\"";
@@ -1703,7 +1716,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
 
         case .STRING;
             string_pointer := cast(*string) dest;
-            <<string_pointer = to_parse;
+            string_pointer.* = to_parse;
             return true, "";
         case .ENUM;
             info_enum := cast(*Type_Info_Enum) info;
@@ -1744,7 +1757,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
                     // because we can’t know if it’s a default value or somethign we allocated for a previous value.
                     array := cast(*Array_View_64) dest;
                     array_count_pointer = *array.count;
-                    old := <<array;
+                    old := array.*;
                     array.data = alloc((old.count + 1) * element_size);
                     if old.data {
                         memcpy(array.data, old.data, old.count * element_size);
@@ -1755,7 +1768,7 @@ parse_value :: (dest: *void, info: *Type_Info, to_parse: string) -> success: boo
             }
             success, error_message := parse_value(element_data, info_array.element_type, to_parse);
             if !success	return false, error_message;
-            <<array_count_pointer += 1;
+            array_count_pointer.* += 1;
 
             return true, "";
 

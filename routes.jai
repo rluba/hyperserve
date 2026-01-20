@@ -137,10 +137,10 @@ add_route :: (node: *Routing_Node, entry: Routing_Node.Entry, segments: [] Route
         if current.literal {
             // Literal segment with parameters further down
             sub_node_pointer := find_or_add(*node.literal, current.literal);
-            if !(<<sub_node_pointer) {
-                <<sub_node_pointer = New(Routing_Node);
+            if !(sub_node_pointer.*) {
+                sub_node_pointer.* = New(Routing_Node);
             }
-            return add_route(<<sub_node_pointer, entry, remaining, parameter_index);
+            return add_route(sub_node_pointer.*, entry, remaining, parameter_index);
         } else if current.wildcard {
             // Wildcard route
             if !is_empty(node.wildcard) {
