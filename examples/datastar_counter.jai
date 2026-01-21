@@ -37,20 +37,20 @@ index :: (request: *Request, parameters: *Request_Parameters()) {
     <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.0-RC.7/bundles/datastar.js"></script>
   <body>
     <h2>%1</h2>
-    <div data-init="@get('/updates')">Get Backend State</div>
+    <div data-init="@get('/updates')"></div>
     <div id="counter"></div>
   </body>
 </html>
 END
 
-    body :: #run sprint(template, "Jai + Datastar Example");
+    body :: #run sprint(template, "Datastar Counter Example");
 
     respond(body, content_type="text/html");
 }
 
 Request_State :: struct {
-    counter    : int;
-    phase      : Counter_Phase;
+    counter : int;
+    phase   : Counter_Phase;
 }
 
 Counter_Phase :: enum {
@@ -124,10 +124,7 @@ timer_task_begin_work :: (task: *Async_Task) {
     timer_task := cast(*Timer_Task) task;
 
     success: bool;
-    success, timer_task.timer = add_timer(timer_task.wait_group, timer_task, on_timer_timeout, TIMEOUT_MS, recurring = false);
-    if !success {
-        return;
-    }
+    _, timer_task.timer = add_timer(timer_task.wait_group, timer_task, on_timer_timeout, TIMEOUT_MS, recurring = false);
 }
 
 on_timer_timeout :: (group: *Wait_Group, handle: User_Event_Id, task: *Timer_Task) {
