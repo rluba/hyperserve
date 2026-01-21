@@ -687,8 +687,6 @@ finalize_sending_task :: (task: *Sending_Task, abort: bool) {
         }
         request.aborted_response = true;
         request.client.remove_after_request = true;
-    } else {
-        reset(*request.response_builder);
     }
 
     on_complete(task);
