@@ -122,8 +122,6 @@ TIMEOUT_MS :: 1000;
 
 timer_task_begin_work :: (task: *Async_Task) {
     timer_task := cast(*Timer_Task) task;
-
-    success: bool;
     _, timer_task.timer = add_timer(timer_task.wait_group, timer_task, on_timer_timeout, TIMEOUT_MS, recurring = false);
 }
 
