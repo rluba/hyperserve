@@ -64,7 +64,7 @@ updates :: (request: *Request, parameters: *Request_Parameters()) {
 
     if #complete phase == {
       case .INIT;
-        SSE_HEADERS := Response_Header.[
+        SSE_HEADERS :: Response_Header.[
             .{ name = "Cache-Control", value = "no-cache"   },
             .{ name = "Connection",    value = "keep-alive" },
         ];
