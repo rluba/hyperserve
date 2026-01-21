@@ -1214,7 +1214,7 @@ thread_handle_request :: (group: *Thread_Group, thread: *Thread, work: *void) ->
     }
 
     if request.phase == .HANDLING {
-        // assert(request.response_status_code == 0);
+        assert(request.is_event_stream || request.response_status_code == 0);
         request.route.handler(request, request.parsed_parameters);
     }
 
