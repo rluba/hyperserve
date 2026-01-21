@@ -758,29 +758,6 @@ proceed_request_past_authentication :: (request: *Request) {
 #load "routes.jai";
 #load "yield.jai";
 
-remove_client :: (server: *Server, client: *Client) -> success: bool {
-    if server.verbose log("Removing a client (% open connections)", server.open_connections);
-    for * server.clients {
-        if it.socket == client.socket {
-            if client.waiting_for_data {
-                remove_handle(*server.wait_group, client.socket);
-            }
-            if client.receive_timer {
-                remove_timer(*server.wait_group, client.receive_timer);
-                client.receive_timer = 0;
-            }
-
-            deinit(it);
-            server.open_connections -= 1;
-            remove it;
-
-            return true;
-        }
-    }
-
-    return false;
-}
-
 #scope_file
 
 reset_client_after_request :: (using client: *Client) {
@@ -1023,6 +1000,29 @@ add_client_to_wait_group :: (server: *Server, client: *Client) {
     }
 
     client.waiting_for_data = true;
+}
+
+remove_client :: (server: *Server, client: *Client) -> success: bool {
+    if server.verbose log("Removing a client (% open connections)", server.open_connections);
+    for * server.clients {
+        if it.socket == client.socket {
+            if client.waiting_for_data {
+                remove_handle(*server.wait_group, client.socket);
+            }
+            if client.receive_timer {
+                remove_timer(*server.wait_group, client.receive_timer);
+                client.receive_timer = 0;
+            }
+
+            deinit(it);
+            server.open_connections -= 1;
+            remove it;
+
+            return true;
+        }
+    }
+
+    return false;
 }
 
 deinit :: (client: *Client) {
