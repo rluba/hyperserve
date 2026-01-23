@@ -524,12 +524,6 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
     // @ToDo: Maybe keep track of the HTTP version that was send and use the same version in the response?
     print_to_builder(builder, "% % %\r\n", request.http_version, cast(int) status_code_to_send, get_reason_string(status_code_to_send));
     print_to_builder(builder, "content-type: %; charset=utf-8\r\n", content_type);
-    if request.http_version == HTTP_1_0 && client.remove_after_request == false {
-        append(builder, "connection: keep-alive\r\n");
-    }
-    if request.http_version == HTTP_1_1 && client.remove_after_request == true {
-        append(builder, "connection: close\r\n");
-    }
 
     size_header_needs_to_be_added := true;
     if content_type == "text/event-stream" {
@@ -555,8 +549,12 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         }
     }
 
-    if size_header_needs_to_be_added {
-        print_to_builder(builder, "content-length: %\r\n", content_length);
+    if request.is_event_stream { // Unsure if this jives properly with the client.remove_after_request logic - @dgrisham
+        append(builder, "connection: keep-alive\r\n");
+    } else if request.http_version == HTTP_1_0 && client.remove_after_request == false {
+        append(builder, "connection: keep-alive\r\n");
+    } else if request.http_version == HTTP_1_1 && client.remove_after_request == true {
+        append(builder, "connection: close\r\n");
     }
 
     append(builder, "\r\n");
@@ -1823,6 +1821,8 @@ repeat_if_interrupted :: (call: Code) -> s64 #expand {
         return result;
     }
 }
+
+#import "my-jai-utils";
 
 #import "Basic";
 #import "Bucket_Array";
