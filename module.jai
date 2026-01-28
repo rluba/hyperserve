@@ -576,6 +576,7 @@ start_sending_response :: () {
     request_yield(task);
 }
 
+// flush() is NOT safe for concurrent use
 flush :: () {
     using context.hyperserve;
 
