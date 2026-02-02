@@ -553,9 +553,7 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         }
     }
 
-    if request.is_event_stream { // Unsure if this jives properly with the client.remove_after_request logic - @dgrisham
-        append(builder, "connection: keep-alive\r\n");
-    } else if request.http_version == HTTP_1_0 && client.remove_after_request == false {
+    if request.is_event_stream || (request.http_version == HTTP_1_0 && client.remove_after_request == false) {
         append(builder, "connection: keep-alive\r\n");
     } else if request.http_version == HTTP_1_1 && client.remove_after_request == true {
         append(builder, "connection: close\r\n");
@@ -1826,8 +1824,6 @@ repeat_if_interrupted :: (call: Code) -> s64 #expand {
         return result;
     }
 }
-
-#import "my-jai-utils";
 
 #import "Basic";
 #import "Bucket_Array";
