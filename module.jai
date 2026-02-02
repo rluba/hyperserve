@@ -295,7 +295,11 @@ start :: (server: *Server, port: u16, num_threads: s32 = 10) -> bool {
             return false;
         }
 
-        result = setsockopt(server.socket, SOL_IPV6, IPV6_V6ONLY, *zero, size_of(type_of(zero)));
+        #if OS == .MACOS {
+            result = setsockopt(server.socket, cast(s32) IPPROTO.IPV6, IPV6_V6ONLY, *zero, size_of(type_of(zero)));
+        } else {
+            result = setsockopt(server.socket, SOL_IPV6, IPV6_V6ONLY, *zero, size_of(type_of(zero)));
+        }
         if result == -1 {
             error_code := get_last_socket_error();
             error_string := System.get_error_string(error_code);
