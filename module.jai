@@ -548,6 +548,10 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
         }
     }
 
+    if size_header_needs_to_be_added {
+        print_to_builder(builder, "content-length: %\r\n", content_length);
+    }
+
     if request.is_event_stream || (request.http_version == HTTP_1_0 && client.remove_after_request == false) {
         append(builder, "connection: keep-alive\r\n");
     } else if request.http_version == HTTP_1_1 && client.remove_after_request == true {
