@@ -93,6 +93,8 @@ updates :: (request: *Request, parameters: *Request_Parameters()) {
             // wait TIMEOUT_MS before sending the next event
             task := New(Timer_Task);
             request_yield(task);
+        } else {
+            close_event_stream();
         }
     }
 }

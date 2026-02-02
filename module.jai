@@ -588,6 +588,13 @@ flush :: () {
     request_yield(task);
 }
 
+close_event_stream :: () {
+    using context.hyperserve;
+
+    request.is_event_stream = false;
+    start_sending_response();
+}
+
 Sending_Task :: struct {
     using #as base: Async_Task;
     base.begin_work = sending_task_begin_work;
