@@ -545,11 +545,6 @@ begin_response :: (builder: *String_Builder, content_length: s64, status_code: S
             case "content-length"; #through;
             case "transfer-encoding";
                 size_header_needs_to_be_added = false;
-            case "content-type";
-                if it.value == "text/event-stream" {
-                    request.is_event_stream = true;
-                    size_header_needs_to_be_added = false;
-                }
         }
     }
 
