@@ -1437,7 +1437,7 @@ find_route_and_parse_parameters :: (request: *Request) {
         return;
     }
 
-    // assert(request.method == .GET, "Non-GET requests are not implemented yet!"); // @Incomplete
+    assert(request.method == .GET, "Non-GET requests are not implemented yet!"); // @Incomplete
     // @ToDo: Wait for the remaining body and maybe parse it for non-GET requests :HandleBody:
 
     found, path, remainder := split_from_left(request.target, #char "?");
