@@ -485,7 +485,8 @@ respond :: (response: [] u8, status_code := Status_Code.AUTO, content_type := "t
     success := begin_response(*request.response_builder, response.count, status_code, content_type, headers);
     if !success return;
 
-    append(*request.response_builder, cast(string) response);
+    // A response to HEAD has the headers of the GET response, including content-length, but no body.
+    if request.method != .HEAD  append(*request.response_builder, cast(string) response);
 
     start_sending_response();
 }
@@ -500,7 +501,7 @@ respond :: (response_builder: *String_Builder, status_code := Status_Code.AUTO, 
     success := begin_response(*request.response_builder, content_length, status_code, content_type, headers);
     if !success return;
 
-    append_and_steal_buffers(*request.response_builder, response_builder);
+    if request.method != .HEAD  append_and_steal_buffers(*request.response_builder, response_builder);
 
     start_sending_response();
 }
@@ -1430,14 +1431,17 @@ get_url_target :: (url: string, prefix: string) -> string {
 
 find_route_and_parse_parameters :: (request: *Request) {
     verbose := context.hyperserve.server.verbose;
-    node := table_find_pointer(*context.hyperserve.server.routes, request.method);
+    // Unless there are routes for HEAD, answer HEAD like GET. respond() leaves out the body.
+    route_method := request.method;
+    if route_method == .HEAD && !table_find_pointer(*context.hyperserve.server.routes, .HEAD)  route_method = .GET;
+    node := table_find_pointer(*context.hyperserve.server.routes, route_method);
     if !node {
         log_error("No routes for method %", request.method);
         respond("", .NOT_FOUND);
         return;
     }
 
-    assert(request.method == .GET, "Non-GET requests are not implemented yet!"); // @Incomplete
+    assert(request.method == .GET || request.method == .HEAD, "Non-GET requests are not implemented yet!"); // @Incomplete
     // @ToDo: Wait for the remaining body and maybe parse it for non-GET requests :HandleBody:
 
     found, path, remainder := split_from_left(request.target, #char "?");
