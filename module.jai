@@ -475,7 +475,7 @@ redirect :: (target_url: string, status_code := Status_Code.SEE_OTHER) {
 
 // :ResponseHeaderValues:
 respond :: (response := "", status_code := Status_Code.AUTO, content_type := "text/plain", headers: [] Response_Header = .[]) {
-    respond(cast([] u8) response, status_code, content_type);
+    respond(cast([] u8) response, status_code, content_type, headers);
 }
 
 // :ResponseHeaderValues:
